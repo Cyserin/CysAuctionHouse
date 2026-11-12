@@ -122,10 +122,28 @@ local function Say(text, state)
     if D.OnChange then pcall(D.OnChange) end
 end
 
+local ReadCommodity, ReadItem -- below
+local token = 0
 local function Search(id)
     local key = C_AuctionHouse.MakeItemKey(id)
     local sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }
     C_AuctionHouse.SendSearchQuery(key, sorts, true)
+    token = token + 1
+    local mine, sel = token, D.sel
+    -- read results the game already had (it may send no event for those)
+    local function Check()
+        if mine ~= token or D.state ~= "searching" or D.sel ~= sel then return end
+        if (C_AuctionHouse.GetNumCommoditySearchResults(id) or 0) > 0 then ReadCommodity(id)
+        elseif (C_AuctionHouse.GetNumItemSearchResults(key) or 0) > 0 then ReadItem(key)
+        elseif C_AuctionHouse.HasSearchResults and C_AuctionHouse.HasSearchResults(key) then ReadItem(key) end
+    end
+    C_Timer.After(0.6, Check)
+    C_Timer.After(2, Check)
+    C_Timer.After(6, function()
+        if mine == token and D.state == "searching" and D.sel == sel then
+            Say("The Auction House did not answer. Click the deal again to retry.", "idle")
+        end
+    end)
 end
 
 local waitingReady = false
@@ -165,7 +183,7 @@ local function LiveDone(live)
     Say(("Now: %d for %s  -  profit about %s"):format(live.qty, AH.Money(live.cost), AH.Money(math.max(0, profit))), "ready")
 end
 
-AH.On("COMMODITY_SEARCH_RESULTS_UPDATED", function(itemID)
+function ReadCommodity(itemID)
     local sel = D.sel
     if not sel or itemID ~= sel.id or D.state ~= "searching" then return end
     local qty, cost = 0, 0
@@ -176,9 +194,11 @@ AH.On("COMMODITY_SEARCH_RESULTS_UPDATED", function(itemID)
         end
     end
     LiveDone({ id = itemID, commodity = true, qty = qty, cost = cost })
-end)
+end
+AH.On("COMMODITY_SEARCH_RESULTS_UPDATED", ReadCommodity)
+AH.On("COMMODITY_SEARCH_RESULTS_ADDED", ReadCommodity)
 
-AH.On("ITEM_SEARCH_RESULTS_UPDATED", function(itemKey)
+function ReadItem(itemKey)
     local sel = D.sel
     if not sel or not itemKey or itemKey.itemID ~= sel.id or D.state ~= "searching" then return end
     local auctions, qty, cost = {}, 0, 0
@@ -194,7 +214,9 @@ AH.On("ITEM_SEARCH_RESULTS_UPDATED", function(itemKey)
     end
     table.sort(auctions, function(a, b) return a.unit < b.unit end)
     LiveDone({ id = sel.id, itemKey = itemKey, commodity = false, qty = qty, cost = cost, auctions = auctions })
-end)
+end
+AH.On("ITEM_SEARCH_RESULTS_UPDATED", ReadItem)
+AH.On("ITEM_SEARCH_RESULTS_ADDED", ReadItem)
 
 -- The Buy / Confirm button (always the player's own click)
 function D.Buy()

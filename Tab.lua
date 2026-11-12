@@ -134,6 +134,35 @@ function UI.Build()
     ver:SetPoint("LEFT", title, "RIGHT", 8, -1)
     ver:SetText("v" .. AH.version)
 
+    -- full scan from any view: "Full scan" / countdown / progress
+    local scanB = S.Button(f, 132, 20, "Full scan")
+    scanB:SetPoint("LEFT", ver, "RIGHT", 14, 0)
+    scanB:SetScript("OnClick", function() Scan.Start(true) end)
+    scanB:HookScript("OnEnter", function(s)
+        GameTooltip:SetOwner(s, "ANCHOR_BOTTOM")
+        GameTooltip:SetText("Full scan")
+        local last = AH.realm and AH.realm.lastFull
+        GameTooltip:AddLine(last and ("Last scan: " .. AH.Age(time() - last) .. " ago") or "No full scan yet.", 1, 1, 1)
+        GameTooltip:AddLine("Reads every auction at once to update all prices. The game allows one every 15 minutes.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    scanB:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    local function PaintScanButton()
+        if Scan.state == "waiting" then
+            scanB:SetLabel("Scanning..."); scanB:SetActive(false)
+        elseif Scan.state == "reading" then
+            scanB:SetLabel(("Scanning %d%%"):format(Scan.progress * 100)); scanB:SetActive(false)
+        else
+            local wait = Scan.Cooldown()
+            if wait > 0 then
+                scanB:SetLabel("Next scan " .. Clock(wait)); scanB:SetActive(false)
+            else
+                scanB:SetLabel("Full scan"); scanB:SetActive(true)
+            end
+        end
+    end
+    UI.PaintScanButton = PaintScanButton
+
     -- the two views: Prices and Deals
     local pv = CreateFrame("Frame", nil, f)
     pv:SetAllPoints()
@@ -230,13 +259,13 @@ function UI.Build()
         end
     end
     UI.PaintScan = PaintScan
-    Scan.OnChange = PaintScan
+    Scan.OnChange = function() PaintScan(); PaintScanButton() end
 
     -- the countdown ticks once a second while the panel shows
     local tick = 0
     f:SetScript("OnUpdate", function(_, el)
         tick = tick + el
-        if tick >= 1 then tick = 0; PaintScan() end
+        if tick >= 1 then tick = 0; PaintScan(); PaintScanButton() end
     end)
 
     ---------------------------------------------------------------- price list
@@ -371,6 +400,7 @@ function UI.Build()
         tab.line:Show()
         tab.bg:SetColorTexture(T.selected[1], T.selected[2], T.selected[3], 1)
         PaintScan()
+        PaintScanButton()
         Refresh()
         if UI.RefreshDeals and UI.views.deals and UI.views.deals:IsShown() then UI.RefreshDeals() end
     end)

@@ -122,7 +122,9 @@ local function Say(text, state)
 end
 
 local waiting = false
-local function Search()
+local ReadCommodity, ReadItem -- below
+local token = 0
+local function Search(tries)
     local sel = Sell.sel
     if not sel then return end
     if C_AuctionHouse.IsThrottledMessageSystemReady and not C_AuctionHouse.IsThrottledMessageSystemReady() then
@@ -130,8 +132,32 @@ local function Search()
         return
     end
     waiting = false
+    tries = tries or 1
+    token = token + 1
+    local mine = token
     local sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }
     C_AuctionHouse.SendSellSearchQuery(sel.key, sorts, true)
+    -- the game does not always send an event (e.g. results it already had): look for results ourselves
+    local function Check()
+        if mine ~= token or Sell.state ~= "searching" or Sell.sel ~= sel then return end
+        local has = C_AuctionHouse.HasSearchResults and C_AuctionHouse.HasSearchResults(sel.key)
+        if (C_AuctionHouse.GetNumCommoditySearchResults(sel.id) or 0) > 0 then ReadCommodity(sel.id)
+        elseif (C_AuctionHouse.GetNumItemSearchResults(sel.key) or 0) > 0 then ReadItem(sel.key)
+        elseif has then
+            if sel.commodity then ReadCommodity(sel.id) else ReadItem(sel.key) end
+        end
+    end
+    C_Timer.After(0.6, Check)
+    C_Timer.After(2, Check)
+    C_Timer.After(5, function()
+        if mine ~= token or Sell.state ~= "searching" or Sell.sel ~= sel then return end
+        if tries < 2 then
+            Search(tries + 1)
+        else
+            Sell.listings = {}
+            Say("The Auction House did not answer. Click the item again to retry.", "ready")
+        end
+    end)
 end
 AH.On("AUCTION_HOUSE_THROTTLED_SYSTEM_READY", function()
     if waiting and Sell.state == "searching" then Search() end
@@ -173,9 +199,10 @@ local function Loaded(list)
     if Sell.OnListings then pcall(Sell.OnListings) end
 end
 
-AH.On("COMMODITY_SEARCH_RESULTS_UPDATED", function(itemID)
+function ReadCommodity(itemID)
     local sel = Sell.sel
-    if not sel or not sel.commodity or itemID ~= sel.id or Sell.state ~= "searching" then return end
+    if not sel or itemID ~= sel.id or Sell.state ~= "searching" then return end
+    sel.commodity = true -- an answer as a commodity settles what kind of item it is
     local list = {}
     for i = 1, C_AuctionHouse.GetNumCommoditySearchResults(itemID) or 0 do
         local r = C_AuctionHouse.GetCommoditySearchResultInfo(itemID, i)
@@ -184,11 +211,14 @@ AH.On("COMMODITY_SEARCH_RESULTS_UPDATED", function(itemID)
         end
     end
     Loaded(list)
-end)
+end
+AH.On("COMMODITY_SEARCH_RESULTS_UPDATED", ReadCommodity)
+AH.On("COMMODITY_SEARCH_RESULTS_ADDED", ReadCommodity)
 
-AH.On("ITEM_SEARCH_RESULTS_UPDATED", function(itemKey)
+function ReadItem(itemKey)
     local sel = Sell.sel
-    if not sel or sel.commodity or not itemKey or itemKey.itemID ~= sel.id or Sell.state ~= "searching" then return end
+    if not sel or not itemKey or itemKey.itemID ~= sel.id or Sell.state ~= "searching" then return end
+    sel.commodity = false
     local list = {}
     for i = 1, C_AuctionHouse.GetNumItemSearchResults(itemKey) or 0 do
         local r = C_AuctionHouse.GetItemSearchResultInfo(itemKey, i)
@@ -197,7 +227,9 @@ AH.On("ITEM_SEARCH_RESULTS_UPDATED", function(itemKey)
         end
     end
     Loaded(list)
-end)
+end
+AH.On("ITEM_SEARCH_RESULTS_UPDATED", ReadItem)
+AH.On("ITEM_SEARCH_RESULTS_ADDED", ReadItem)
 
 -- Price to suggest: undercut the cheapest listing that isn't yours, or match yours when yours is cheapest;
 -- nothing listed -> saved price / usual price / blank
@@ -243,6 +275,9 @@ function Sell.Post(qty, unit)
         return
     end
     local dur = AH.settings.sellDuration
+    local status = C_AuctionHouse.GetItemCommodityStatus(sel.loc)
+    if status == Enum.ItemCommodityStatus.Commodity then sel.commodity = true
+    elseif status == Enum.ItemCommodityStatus.Item then sel.commodity = false end
     local ok
     if sel.commodity then ok = C_AuctionHouse.PostCommodity(sel.loc, dur, qty, unit)
     else ok = C_AuctionHouse.PostItem(sel.loc, dur, qty, nil, unit) end
