@@ -137,3 +137,31 @@ function S.EditBox(parent, w, h)
     e.hint:SetPoint("LEFT", 7, 0)
     return e
 end
+
+-- Stepper: label, then [-] value [+]. values = list; get() -> current value; set(v); fmt(v) -> text
+function S.Stepper(parent, label, values, get, set, fmt)
+    local T = S.T()
+    local s = CreateFrame("Frame", nil, parent)
+    s:SetSize(208, 20)
+    s.label = S.Text(s, 11, T.text)
+    s.label:SetPoint("LEFT")
+    s.label:SetText(label)
+    s.plus = S.Button(s, 18, 18, "+")
+    s.plus:SetPoint("RIGHT")
+    s.value = S.Text(s, 11, T.accent, "CENTER")
+    s.value:SetWidth(58)
+    s.value:SetPoint("RIGHT", s.plus, "LEFT", -2, 0)
+    s.minus = S.Button(s, 18, 18, "-")
+    s.minus:SetPoint("RIGHT", s.value, "LEFT", -2, 0)
+    local function Index()
+        local cur = get()
+        for i, v in ipairs(values) do if v == cur then return i end end
+        for i, v in ipairs(values) do if v >= cur then return i end end
+        return #values
+    end
+    function s:Refresh() self.value:SetText(fmt(get())) end
+    s.minus:SetScript("OnClick", function() local i = Index(); if i > 1 then set(values[i - 1]) end; s:Refresh() end)
+    s.plus:SetScript("OnClick", function() local i = Index(); if i < #values then set(values[i + 1]) end; s:Refresh() end)
+    s:Refresh()
+    return s
+end

@@ -1,7 +1,7 @@
 --------------------------------------------------------------------------------
 -- Cys's Auction House - tooltip lines
---   AH: 1g 20s (2h)          lowest buyout per item, and how long ago it was seen
---   AH usual: 1g 05s         middle of the daily lows (only when 2+ days are saved and it differs)
+--   Cys AH: 1g 20s (2h)          lowest buyout per item, and how long ago it was seen
+--   Cys AH usual: 1g 05s         middle of the daily lows (only when 2+ days are saved and it differs)
 --------------------------------------------------------------------------------
 local AH = CysAH
 
@@ -12,10 +12,10 @@ local function Add(tt, itemID)
     local age = AH.GetPriceAge(itemID)
     local right = AH.Money(price)
     if age then right = right .. " |cff8a8a8a(" .. AH.Age(age) .. ")|r" end
-    tt:AddDoubleLine("|cffd9a421AH|r", "|cffffffff" .. right .. "|r")
+    tt:AddDoubleLine("|cffd9a421Cys AH|r", "|cffffffff" .. right .. "|r")
     local market = AH.GetMarketPrice(itemID)
     if market and math.abs(market - price) > price * 0.05 then
-        tt:AddDoubleLine("|cffd9a421AH usual|r", "|cffffffff" .. AH.Money(market) .. "|r")
+        tt:AddDoubleLine("|cffd9a421Cys AH usual|r", "|cffffffff" .. AH.Money(market) .. "|r")
     end
 end
 

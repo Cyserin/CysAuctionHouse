@@ -57,6 +57,7 @@ AH.On("ADDON_LOADED", function(name)
     end
     db.realms = db.realms or {}
     db.names = db.names or {} -- [itemID] = name, so the price list can be searched by name
+    for id, n in pairs(db.names) do if n == "" then db.names[id] = nil end end -- 0.1.0-0.1.2 saved some empty names
     local key = RealmKey()
     db.realms[key] = db.realms[key] or { items = {} }
     AH.db = db

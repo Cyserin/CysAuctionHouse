@@ -85,8 +85,8 @@ local function Read(token)
                 if not a then a = { q = 0, n = 0, u = {} }; agg[itemID] = a end
                 a.q = a.q + count
                 a.n = a.n + 1
-                a.u[#a.u + 1] = unit
-                if name and not names[itemID] then names[itemID] = name end
+                a.u[#a.u + 1] = { unit, count }
+                if name and name ~= "" and not names[itemID] then names[itemID] = name end
             end
             i = i + 1
         end
@@ -97,10 +97,12 @@ local function Read(token)
             return
         end
         local now, n = time(), 0
+        local byUnit = function(x, y) return x[1] < y[1] end
         for itemID, a in pairs(agg) do
-            table.sort(a.u)
-            if #a.u > DEPTH then for k = #a.u, DEPTH + 1, -1 do a.u[k] = nil end end
-            P.Record(itemID, a.u[1], a.q, a.n, a.u, now)
+            table.sort(a.u, byUnit)
+            local units, counts = {}, {}
+            for k = 1, math.min(DEPTH, #a.u) do units[k], counts[k] = a.u[k][1], a.u[k][2] end
+            P.Record(itemID, units[1], a.q, a.n, units, now, counts)
             n = n + 1
         end
         AH.realm.lastFull = now
@@ -174,33 +176,34 @@ AH.On("COMMODITY_SEARCH_RESULTS_UPDATED", function(itemID)
     if not itemID then return end
     local num = C_AuctionHouse.GetNumCommoditySearchResults(itemID) or 0
     if num == 0 then return end
-    local list, listings = {}, 0
-    for i = 1, num do
+    local list, counts, listings = {}, {}, 0
+    for i = 1, num do -- the game sends these cheapest first
         local r = C_AuctionHouse.GetCommoditySearchResultInfo(itemID, i)
         if r and r.unitPrice and r.unitPrice > 0 then
             listings = listings + 1
-            if #list < DEPTH then list[#list + 1] = r.unitPrice end
+            if #list < DEPTH then list[#list + 1] = r.unitPrice; counts[#counts + 1] = r.quantity end
         end
     end
     if #list == 0 then return end
-    table.sort(list)
-    P.Record(itemID, list[1], C_AuctionHouse.GetCommoditySearchResultsQuantity(itemID), listings, list)
+    P.Record(itemID, list[1], C_AuctionHouse.GetCommoditySearchResultsQuantity(itemID), listings, list, nil, counts)
     AH.FirePricesChanged()
 end)
 
 AH.On("ITEM_SEARCH_RESULTS_UPDATED", function(itemKey)
     if not itemKey or not itemKey.itemID or (itemKey.battlePetSpeciesID or 0) ~= 0 then return end
     local num = C_AuctionHouse.GetNumItemSearchResults(itemKey) or 0
-    local units, qty = {}, 0
+    local rows, qty = {}, 0
     for i = 1, num do
         local r = C_AuctionHouse.GetItemSearchResultInfo(itemKey, i)
         if r and r.buyoutAmount and r.buyoutAmount > 0 and r.quantity and r.quantity > 0 then
-            units[#units + 1] = r.buyoutAmount / r.quantity
+            rows[#rows + 1] = { r.buyoutAmount / r.quantity, r.quantity }
             qty = qty + r.quantity
         end
     end
-    if #units == 0 then return end
-    table.sort(units)
-    P.Record(itemKey.itemID, units[1], qty, #units, units)
+    if #rows == 0 then return end
+    table.sort(rows, function(x, y) return x[1] < y[1] end)
+    local units, counts = {}, {}
+    for k = 1, math.min(DEPTH, #rows) do units[k], counts[k] = rows[k][1], rows[k][2] end
+    P.Record(itemKey.itemID, units[1], qty, #rows, units, nil, counts)
     AH.FirePricesChanged()
 end)

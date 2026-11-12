@@ -42,7 +42,7 @@ local function BagItems()
             local info = C_Container.GetContainerItemInfo(bag, slot)
             if info and info.itemID and not info.isBound then
                 local name = info.hyperlink and info.hyperlink:match("%[(.-)%]")
-                if name and name ~= "" and AH.db and not AH.db.names[info.itemID] then AH.db.names[info.itemID] = name end
+                if name and name ~= "" and AH.db and (AH.db.names[info.itemID] or "") == "" then AH.db.names[info.itemID] = name end
                 if not counts[info.itemID] then order[#order + 1] = info.itemID end
                 counts[info.itemID] = (counts[info.itemID] or 0) + (info.stackCount or 1)
             end
@@ -114,23 +114,54 @@ function UI.Build()
     f:EnableMouseWheel(true)
     f:SetScript("OnMouseWheel", function() end)
     f:Hide()
-    f.bg = S.Tex(f, "BACKGROUND", T.bg)
-    f.bg:SetAllPoints()
-    f.bg:SetColorTexture(T.bg[1], T.bg[2], T.bg[3], 1) -- fully solid: the AH's own search bar must not show through
-    S.Border(f, T.border)
+    -- background in two pieces so the portrait (top-left) shows like on the game's own tabs;
+    -- no edge of our own: the AH window's frame is the border
+    local NOTCH_W, NOTCH_H = 50, 28
+    local top = S.Tex(f, "BACKGROUND", T.bg)
+    top:SetPoint("TOPLEFT", NOTCH_W, 0)
+    top:SetPoint("TOPRIGHT")
+    top:SetHeight(NOTCH_H)
+    local main = S.Tex(f, "BACKGROUND", T.bg)
+    main:SetPoint("TOPLEFT", 0, -NOTCH_H)
+    main:SetPoint("BOTTOMRIGHT")
+    for _, t in ipairs({ top, main }) do t:SetColorTexture(T.bg[1], T.bg[2], T.bg[3], 1) end -- fully solid
     UI.panel = f
 
     local title = S.Text(f, 14, T.accent)
-    title:SetPoint("TOPLEFT", 62, -12)
+    title:SetPoint("TOPLEFT", 66, -13)
     title:SetText("Cys's Auction House")
     local ver = S.Text(f, 10, T.dim)
     ver:SetPoint("LEFT", title, "RIGHT", 8, -1)
-    ver:SetText("v" .. AH.version .. "  -  Prices")
+    ver:SetText("v" .. AH.version)
+
+    -- the two views: Prices and Deals
+    local pv = CreateFrame("Frame", nil, f)
+    pv:SetAllPoints()
+    UI.views = { prices = pv }
+    local switch = {}
+    local function SetView(name)
+        AH.settings.view = name
+        for key, frame in pairs(UI.views) do frame:SetShown(key == name) end
+        for key, b in pairs(switch) do
+            S.SetBorder(b.edges, key == name and T.glow or T.line)
+            b.bg:SetColorTexture(unpack(key == name and T.selected or T.button))
+        end
+    end
+    UI.SetView = SetView
+    local prev
+    for _, def in ipairs({ { "deals", "Deals" }, { "prices", "Prices" } }) do
+        local b = S.Button(f, 74, 22, def[2])
+        if prev then b:SetPoint("RIGHT", prev, "LEFT", -4, 0) else b:SetPoint("TOPRIGHT", -10, -12) end
+        b:SetScript("OnClick", function() SetView(def[1]) end)
+        b:SetScript("OnLeave", function(s) S.SetBorder(s.edges, AH.settings.view == def[1] and T.glow or T.line) end)
+        switch[def[1]] = b
+        prev = b
+    end
 
     ---------------------------------------------------------------- scan card
-    local card = S.Panel(f, T.card, T.line)
-    card:SetPoint("TOPLEFT", 12, -38)
-    card:SetPoint("BOTTOMLEFT", 12, 12)
+    local card = S.Panel(pv, T.card, T.line)
+    card:SetPoint("TOPLEFT", 10, -46)
+    card:SetPoint("BOTTOMLEFT", 10, 8)
     card:SetWidth(232)
 
     local h = S.Text(card, 12, T.accent)
@@ -209,9 +240,9 @@ function UI.Build()
     end)
 
     ---------------------------------------------------------------- price list
-    local list = S.Panel(f, T.card, T.line)
+    local list = S.Panel(pv, T.card, T.line)
     list:SetPoint("TOPLEFT", card, "TOPRIGHT", 10, 0)
-    list:SetPoint("BOTTOMRIGHT", -12, 12)
+    list:SetPoint("BOTTOMRIGHT", -10, 8)
     list:EnableMouseWheel(true)
 
     local box = S.EditBox(list, 240, 22)
@@ -329,7 +360,10 @@ function UI.Build()
     end)
 
     AH.RegisterCallback(Refresh)
-    P.OnNames = Refresh -- item names that arrive late fill in
+    P.OnNames = function() -- item names / vendor prices that arrive late fill in
+        Refresh()
+        if UI.RefreshDeals then UI.RefreshDeals() end
+    end
     AH.On("BAG_UPDATE_DELAYED", Refresh)
 
     f:SetScript("OnShow", function()
@@ -338,6 +372,7 @@ function UI.Build()
         tab.bg:SetColorTexture(T.selected[1], T.selected[2], T.selected[3], 1)
         PaintScan()
         Refresh()
+        if UI.RefreshDeals and UI.views.deals and UI.views.deals:IsShown() then UI.RefreshDeals() end
     end)
     f:SetScript("OnHide", function()
         tab.line:Hide()
@@ -349,6 +384,9 @@ function UI.Build()
         PlaySound(SOUNDKIT and SOUNDKIT.IG_CHARACTER_INFO_TAB or 841)
         f:Show()
     end)
+
+    UI.views.deals = UI.BuildDeals(f)
+    SetView(AH.settings.view == "deals" and "deals" or "prices")
 
     -- the game's own tabs (and anything else that changes what the AH shows) hide our panel
     hooksecurefunc(AHF, "SetDisplayMode", function() f:Hide() end)

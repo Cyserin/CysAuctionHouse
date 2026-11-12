@@ -2,7 +2,8 @@
 -- Cys's Auction House - price store
 -- Per realm + faction, per itemID:
 --   p = lowest buyout per item (copper), q = items listed, n = listings, t = when seen (time()),
---   l = the lowest few prices per item (cheapest first), d = { [day] = lowest price that day }
+--   l = the lowest few listings' price per item (cheapest first), c = items in each of those listings,
+--   d = { [day] = lowest price that day }
 -- The market price is the middle of the daily lows (needs 2+ days), so one odd listing doesn't move it.
 --------------------------------------------------------------------------------
 local AH = CysAH
@@ -32,8 +33,8 @@ end
 
 -- Save what was seen for one item.
 --   unit  = lowest price per item, qty = items listed (or nil), count = listings (or nil),
---   list  = sorted lowest prices per item (or nil)
-function P.Record(itemID, unit, qty, count, list, now)
+--   list  = sorted lowest prices per item (or nil), counts = items in each of those listings (or nil)
+function P.Record(itemID, unit, qty, count, list, now, counts)
     local items = Items()
     if not items or not itemID or not unit or unit <= 0 then return end
     now = now or time()
@@ -45,8 +46,15 @@ function P.Record(itemID, unit, qty, count, list, now)
         local l = {}
         for i = 1, math.min(DEPTH, #list) do l[i] = floor(list[i]) end
         r.l = l
+        if counts then
+            local c = {}
+            for i = 1, #l do c[i] = counts[i] or 1 end
+            r.c = c
+        else
+            r.c = nil
+        end
     else
-        r.l = nil
+        r.l, r.c = nil, nil
     end
     r.d = r.d or {}
     local day = floor(now / 86400)
@@ -98,7 +106,7 @@ end
 -- Item name for the search list (saved names first, then the game's item cache)
 function P.Name(itemID)
     local n = AH.db and AH.db.names[itemID]
-    if n then return n end
+    if n and n ~= "" then return n end
     local name = C_Item and C_Item.GetItemNameByID and C_Item.GetItemNameByID(itemID)
     if not name and GetItemInfo then name = GetItemInfo(itemID) end
     if name and AH.db then AH.db.names[itemID] = name end
