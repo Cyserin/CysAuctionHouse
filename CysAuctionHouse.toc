@@ -1,0 +1,15 @@
+## Interface: 16001
+## Title: Cys's Auction House
+## Notes: Auction House prices, deals and selling help in the Cys look. Lives inside the game's Auction House window.
+## Author: Cyserin
+## Version: 0.1.2
+## SavedVariables: CysAHDB
+## OptionalDeps: CysUI
+## IconTexture: Interface\Icons\INV_Misc_Coin_02
+
+Core.lua
+Style.lua
+Prices.lua
+Scan.lua
+Tooltip.lua
+Tab.lua
