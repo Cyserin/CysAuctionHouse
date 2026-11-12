@@ -19,7 +19,7 @@ local MAX_AGE = 3600
 local ROWS = 16
 local ROW_H = 20
 
-local DEFAULTS = { dealMinProfit = 2000, dealFlipPct = 30, dealConfirmOver = 10000 }
+local DEFAULTS = { dealMinProfit = 2000, dealFlipPct = 30, dealConfirmOver = 10000, dealHideRecipes = true }
 
 AH.On("ADDON_LOADED", function(name)
     if name ~= "CysAuctionHouse" then return end
@@ -51,7 +51,8 @@ function D.Find()
     local now = time()
     local keep = 1 - (set.dealFlipPct or 30) / 100
     for id, r in pairs(AH.realm.items) do
-        if r.l and r.t and now - r.t <= MAX_AGE and not AH.db.hidden[id] then
+        if r.l and r.t and now - r.t <= MAX_AGE and not AH.db.hidden[id]
+            and not (set.dealHideRecipes and ClassID(id) == 9) then
             local l, c = r.l, r.c or {}
             local best
 
@@ -283,8 +284,8 @@ local function Short(copper)
     -- compact money: 1g 20s / 35s 10c / 80c
     copper = math.floor(copper + 0.5)
     local g, s, c = math.floor(copper / 10000), math.floor(copper / 100) % 100, copper % 100
-    if g > 0 then return ("%dg %ds"):format(g, s) end
-    if s > 0 then return ("%ds %dc"):format(s, c) end
+    if g > 0 then return s > 0 and ("%dg %ds"):format(g, s) or (g .. "g") end
+    if s > 0 then return c > 0 and ("%ds %dc"):format(s, c) or (s .. "s") end
     return c .. "c"
 end
 
@@ -316,12 +317,16 @@ function UI.BuildDeals(parent)
         function() return AH.settings.dealFlipPct end, function(x) AH.settings.dealFlipPct = x; Changed() end,
         function(x) return x .. "%" end)
     s2:SetPoint("TOPLEFT", s1, "BOTTOMLEFT", 0, -6)
-    local s3 = S.Stepper(card, "Ask before buying over", { 0, 5000, 10000, 20000, 50000, 100000 },
+    local s3 = S.Stepper(card, "Confirm over", { 0, 5000, 10000, 20000, 50000, 100000 },
         function() return AH.settings.dealConfirmOver end, function(x) AH.settings.dealConfirmOver = x end, MoneyStep)
     s3:SetPoint("TOPLEFT", s2, "BOTTOMLEFT", 0, -6)
 
+    local recipes = S.Check(card, "Hide recipes and formulas",
+        function() return AH.settings.dealHideRecipes end, function(x) AH.settings.dealHideRecipes = x; Changed() end)
+    recipes:SetPoint("TOPLEFT", s3, "BOTTOMLEFT", 0, -8)
+
     local sep = S.Tex(card, "ARTWORK", T.line)
-    sep:SetPoint("TOPLEFT", s3, "BOTTOMLEFT", 0, -12)
+    sep:SetPoint("TOPLEFT", recipes, "BOTTOMLEFT", 0, -10)
     sep:SetSize(208, 1)
 
     -- selected deal
@@ -477,10 +482,12 @@ function UI.BuildDeals(parent)
     function UI.PaintDeals()
         local max = math.max(0, #data - ROWS)
         if offset > max then offset = max end
+        local money = GetMoney()
         for i = 1, ROWS do
             local r, d = rows[i], data[offset + i]
             r.deal = d
             if d then
+                r:SetAlpha(d.cost > money and 0.4 or 1) -- more than you carry: greyed
                 r.icon:SetTexture((C_Item.GetItemIconByID and C_Item.GetItemIconByID(d.id)) or 134400)
                 r.name:SetText(P.Name(d.id) or ("item " .. d.id))
                 local q = Quality(d.id)
@@ -499,7 +506,7 @@ function UI.BuildDeals(parent)
         if #data == 0 then
             foot:SetText("No deals right now. They come from a full scan or your own searches in the last hour.")
         else
-            foot:SetText(("%d-%d of %d  -  Type color: how many listings (green many, yellow some, red few)"):format(
+            foot:SetText(("%d-%d of %d  -  Type color = listings (green many, red few); grey = costs more than you carry"):format(
                 offset + 1, math.min(offset + ROWS, #data), #data))
         end
         local n = 0

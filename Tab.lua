@@ -149,7 +149,7 @@ function UI.Build()
     end
     UI.SetView = SetView
     local prev
-    for _, def in ipairs({ { "deals", "Deals" }, { "prices", "Prices" } }) do
+    for _, def in ipairs({ { "prices", "Prices" }, { "deals", "Deals" }, { "sell", "Sell" } }) do
         local b = S.Button(f, 74, 22, def[2])
         if prev then b:SetPoint("RIGHT", prev, "LEFT", -4, 0) else b:SetPoint("TOPRIGHT", -10, -12) end
         b:SetScript("OnClick", function() SetView(def[1]) end)
@@ -386,10 +386,28 @@ function UI.Build()
     end)
 
     UI.views.deals = UI.BuildDeals(f)
-    SetView(AH.settings.view == "deals" and "deals" or "prices")
+    UI.views.sell = UI.BuildSell(f)
+    local saved = AH.settings.view
+    SetView((saved == "deals" or saved == "prices") and saved or "sell")
 
-    -- the game's own tabs (and anything else that changes what the AH shows) hide our panel
-    hooksecurefunc(AHF, "SetDisplayMode", function() f:Hide() end)
+    -- the game's own tabs (and anything else that changes what the AH shows) hide our panel - one frame later,
+    -- so a right-clicked bag item (the game sends it to its own Sell tab) can be caught for our Sell view
+    hooksecurefunc(AHF, "SetDisplayMode", function()
+        if not f:IsShown() then return end
+        C_Timer.After(0, function()
+            if UI.caught then UI.caught = nil; return end
+            f:Hide()
+        end)
+    end)
+    if AHF.SetPostItem then
+        hooksecurefunc(AHF, "SetPostItem", function(_, loc)
+            if not (f:IsShown() and AH.settings.view == "sell" and AH.Sell and loc and loc.IsValid and loc:IsValid()) then return end
+            local bag, slot = loc:GetBagAndSlot()
+            if not bag then return end
+            UI.caught = true
+            AH.Sell.Select({ loc = ItemLocation:CreateFromBagAndSlot(bag, slot) })
+        end)
+    end
     AHF:HookScript("OnHide", function() f:Hide() end)
 end
 

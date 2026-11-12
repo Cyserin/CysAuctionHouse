@@ -92,6 +92,7 @@ function S.Button(parent, w, h, label)
     function b:SetActive(on)
         if on then self:Enable(); self:SetAlpha(1) else self:Disable(); self:SetAlpha(0.45); S.SetBorder(self.edges, T.line) end
     end
+    function b:SetLabel(text) self.label:SetText(text or "") end
     return b
 end
 
@@ -164,4 +165,44 @@ function S.Stepper(parent, label, values, get, set, fmt)
     s.plus:SetScript("OnClick", function() local i = Index(); if i < #values then set(values[i + 1]) end; s:Refresh() end)
     s:Refresh()
     return s
+end
+
+-- Money input: gold / silver / copper boxes. :GetAmount() -> copper, :SetAmount(copper), .OnChange()
+function S.MoneyInput(parent)
+    local T = S.T()
+    local m = CreateFrame("Frame", nil, parent)
+    m:SetSize(208, 22)
+    local boxes = {}
+    local defs = { { "g", 58, "Interface\\MoneyFrame\\UI-GoldIcon" }, { "s", 34, "Interface\\MoneyFrame\\UI-SilverIcon" },
+                   { "c", 34, "Interface\\MoneyFrame\\UI-CopperIcon" } }
+    local prev
+    for i, d in ipairs(defs) do
+        local e = S.EditBox(m, d[2], 22)
+        e:SetNumeric(true)
+        e:SetMaxLetters(i == 1 and 6 or 2)
+        e:SetJustifyH("RIGHT")
+        e:SetTextInsets(4, 4, 0, 0)
+        if prev then e:SetPoint("LEFT", prev, "RIGHT", 18, 0) else e:SetPoint("LEFT") end
+        local icon = m:CreateTexture(nil, "ARTWORK")
+        icon:SetSize(12, 12)
+        icon:SetTexture(d[3])
+        icon:SetPoint("LEFT", e, "RIGHT", 3, 0)
+        e:SetScript("OnTextChanged", function(_, user) if user and m.OnChange then m.OnChange() end end)
+        e:SetScript("OnTabPressed", function() local n = boxes[i % 3 + 1]; n:SetFocus(); n:HighlightText() end)
+        boxes[i] = e
+        prev = e
+    end
+    m.boxes = boxes
+    function m:GetAmount()
+        local g, s, c = tonumber(boxes[1]:GetText()) or 0, tonumber(boxes[2]:GetText()) or 0, tonumber(boxes[3]:GetText()) or 0
+        return g * 10000 + s * 100 + c
+    end
+    function m:SetAmount(copper)
+        copper = math.max(0, math.floor((copper or 0) + 0.5))
+        boxes[1]:SetText(tostring(math.floor(copper / 10000)))
+        boxes[2]:SetText(tostring(math.floor(copper / 100) % 100))
+        boxes[3]:SetText(tostring(copper % 100))
+    end
+    function m:ClearFocus() for _, e in ipairs(boxes) do e:ClearFocus() end end
+    return m
 end
