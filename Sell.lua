@@ -85,6 +85,27 @@ function Sell.BagItems()
     return out
 end
 
+-- /cysah bags: every unbound item the AH turns down, so we can see why something is missing from Your bags
+function Sell.CheckBags()
+    local last = (Enum.BagIndex and Enum.BagIndex.ReagentBag) or 4
+    local n = 0
+    for bag = 0, last do
+        for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
+            local info = C_Container.GetContainerItemInfo(bag, slot)
+            if info and info.itemID then
+                local loc = ItemLocation:CreateFromBagAndSlot(bag, slot)
+                local valid = C_AuctionHouse.IsSellItemValid(loc, false)
+                if info.isBound or not valid then
+                    n = n + 1
+                    AH.Print(("%s  bag %d slot %d  -  %s"):format(info.hyperlink or info.itemID, bag, slot,
+                        info.isBound and "soulbound" or "the AH says it can't be sold"))
+                end
+            end
+        end
+    end
+    AH.Print(n == 0 and "Every item in your bags can be listed." or (n .. " items left out (see above)."))
+end
+
 --------------------------------------------------------------------------------
 -- Selected item + live listings
 --------------------------------------------------------------------------------

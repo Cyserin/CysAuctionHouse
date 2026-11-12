@@ -149,7 +149,7 @@ function UI.Build()
     end
     UI.SetView = SetView
     local prev
-    for _, def in ipairs({ { "prices", "Prices" }, { "deals", "Deals" }, { "sell", "Sell" } }) do
+    for _, def in ipairs({ { "prices", "Prices" }, { "deals", "Deals" }, { "mine", "Auctions" }, { "sell", "Sell" } }) do
         local b = S.Button(f, 74, 22, def[2])
         if prev then b:SetPoint("RIGHT", prev, "LEFT", -4, 0) else b:SetPoint("TOPRIGHT", -10, -12) end
         b:SetScript("OnClick", function() SetView(def[1]) end)
@@ -387,8 +387,9 @@ function UI.Build()
 
     UI.views.deals = UI.BuildDeals(f)
     UI.views.sell = UI.BuildSell(f)
+    UI.views.mine = UI.BuildMine(f)
     local saved = AH.settings.view
-    SetView((saved == "deals" or saved == "prices") and saved or "sell")
+    SetView((saved == "deals" or saved == "prices" or saved == "mine") and saved or "sell")
 
     -- the game's own tabs (and anything else that changes what the AH shows) hide our panel - one frame later,
     -- so a right-clicked bag item (the game sends it to its own Sell tab) can be caught for our Sell view

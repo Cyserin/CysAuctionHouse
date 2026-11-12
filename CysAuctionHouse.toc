@@ -2,7 +2,7 @@
 ## Title: Cys's Auction House
 ## Notes: Auction House prices, deals and selling help in the Cys look. Lives inside the game's Auction House window.
 ## Author: Cyserin
-## Version: 0.3.1
+## Version: 0.4.1
 ## SavedVariables: CysAHDB
 ## OptionalDeps: CysUI
 ## IconTexture: Interface\Icons\INV_Misc_Coin_02
@@ -15,3 +15,4 @@ Tooltip.lua
 Tab.lua
 Deals.lua
 Sell.lua
+Mine.lua

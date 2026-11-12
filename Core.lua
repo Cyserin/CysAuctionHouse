@@ -130,6 +130,8 @@ SlashCmdList.CYSAH = function(msg)
         for _ in pairs(AH.realm.items) do n = n + 1 end
         AH.Print(("%d items priced on this realm. Last full scan: %s."):format(n,
             AH.realm.lastFull and (AH.Age(time() - AH.realm.lastFull) .. " ago") or "never"))
+    elseif msg == "bags" then
+        if AH.Sell and AH.Scan.isOpen then AH.Sell.CheckBags() else AH.Print("Open the Auction House first.") end
     elseif msg == "tooltip" then
         AH.settings.tooltip = not AH.settings.tooltip
         AH.Print("Tooltip prices " .. (AH.settings.tooltip and "on." or "off."))
