@@ -124,14 +124,25 @@ end
 local waiting = false
 local ReadCommodity, ReadItem -- below
 local token = 0
+local waitSince
 local function Search(tries)
     local sel = Sell.sel
     if not sel then return end
+    -- the AH holds searches back for a while (e.g. right after a full scan): check again every half second
     if C_AuctionHouse.IsThrottledMessageSystemReady and not C_AuctionHouse.IsThrottledMessageSystemReady() then
         waiting = true
+        waitSince = waitSince or GetTime()
+        if GetTime() - waitSince > 15 then
+            waiting, waitSince = false, nil
+            Sell.listings = {}
+            Say("The Auction House is busy (searches are held back after a full scan). You can still post; click the item again later to see the listings.", "ready")
+            return
+        end
+        Say("The Auction House is busy - waiting to look up the listings. You can post meanwhile.")
+        C_Timer.After(0.5, function() if waiting and Sell.sel == sel and Sell.state == "searching" then Search(tries) end end)
         return
     end
-    waiting = false
+    waiting, waitSince = false, nil
     tries = tries or 1
     token = token + 1
     local mine = token
@@ -178,6 +189,7 @@ function Sell.Select(entry)
     }
     Sell.listings = nil
     Sell.priceSet = false
+    waitSince = nil
     Say("Loading the current listings...", "searching")
     Search()
 end
@@ -560,7 +572,7 @@ function UI.BuildSell(parent)
             post:SetLabel("Posting..."); post:SetActive(false)
         else
             post:SetLabel(n > 0 and unit > 0 and ("Post " .. n .. " at " .. Short(unit)) or "Post")
-            post:SetActive(n > 0 and unit > 0 and n <= avail and Sell.state ~= "searching")
+            post:SetActive(n > 0 and unit > 0 and n <= avail)
         end
         msg:SetText(Sell.msg or "")
     end
