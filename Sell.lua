@@ -118,6 +118,73 @@ end
 -- Sell.sel = { id, loc, key (ItemKey), commodity, link, icon }
 -- Sell.listings = { { unit, qty, mine } } cheapest first (nil while loading)
 Sell.state = "idle" -- idle / searching / ready / posting / warning
+
+--------------------------------------------------------------------------------
+-- Cloth into bandages: First Aid recipes (our own table). For a cloth, is making bandages and selling them
+-- to a vendor worth more than selling the cloth? Vendor prices are read live from the game.
+-- { cloth, cloth per bandage, bandage item, recipe spell }
+--------------------------------------------------------------------------------
+local BANDAGES = {
+    { 2589, 1, 1251, 3275 },   { 2589, 2, 2581, 3276 },   -- Linen / Heavy Linen
+    { 2592, 1, 3530, 3277 },   { 2592, 2, 3531, 3278 },   -- Wool / Heavy Wool
+    { 4306, 1, 6450, 7928 },   { 4306, 2, 6451, 7929 },   -- Silk / Heavy Silk
+    { 4338, 1, 8544, 10840 },  { 4338, 2, 8545, 10841 },  -- Mageweave / Heavy Mageweave
+    { 14047, 1, 14529, 18629 }, { 14047, 2, 14530, 18630 }, -- Runecloth / Heavy Runecloth
+}
+local BY_CLOTH = {}
+for _, r in ipairs(BANDAGES) do
+    BY_CLOTH[r[1]] = BY_CLOTH[r[1]] or {}
+    table.insert(BY_CLOTH[r[1]], r)
+end
+
+-- known recipe? the spell check first, then what the First Aid window showed us
+local function KnowsRecipe(spell)
+    local ok, v = pcall(function()
+        if C_SpellBook and C_SpellBook.IsSpellKnown and C_SpellBook.IsSpellKnown(spell) then return true end
+        if IsPlayerSpell and IsPlayerSpell(spell) then return true end
+        return false
+    end)
+    if ok and v then return true end
+    local seen = AH.db and AH.db.recipes
+    if seen and seen[spell] ~= nil then return seen[spell] end
+    return nil -- don't know
+end
+local function ReadRecipes()
+    if not (C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo and AH.db) then return end
+    AH.db.recipes = AH.db.recipes or {}
+    for _, r in ipairs(BANDAGES) do
+        local ok, info = pcall(C_TradeSkillUI.GetRecipeInfo, r[4])
+        if ok and info then AH.db.recipes[r[4]] = info.learned and true or false end
+    end
+end
+AH.On("TRADE_SKILL_SHOW", function() C_Timer.After(0.5, ReadRecipes) end)
+AH.On("TRADE_SKILL_LIST_UPDATE", ReadRecipes)
+
+-- Best bandage for n of this cloth, if it beats `beat` (copper). Returns
+-- { name, crafts, value, gain, sure } or nil. Leftover cloth counts at the cloth's vendor price.
+function Sell.BandageBest(clothID, n, beat)
+    local list = BY_CLOTH[clothID]
+    if not list or not n or n <= 0 then return nil end
+    local clothV = SellPrice(clothID) or 0
+    local best
+    for _, r in ipairs(list) do
+        local known = KnowsRecipe(r[4])
+        local bv = SellPrice(r[3])
+        if bv == nil and C_Item and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(r[3]) end
+        local crafts = math.floor(n / r[2])
+        if known ~= false and bv and bv > 0 and crafts > 0 then
+            local value = crafts * bv + (n - crafts * r[2]) * clothV
+            if not best or value > best.value then
+                best = { id = r[3], crafts = crafts, value = value, sure = known == true, per = r[2], each = bv }
+            end
+        end
+    end
+    if best and best.value > (beat or 0) then
+        best.gain = best.value - (beat or 0)
+        best.name = (P and P.Name and P.Name(best.id)) or (C_Item.GetItemNameByID and C_Item.GetItemNameByID(best.id)) or "bandages"
+        return best
+    end
+end
 AH.repost = AH.repost or {} -- [itemID] = true: cancelled in My auctions, Post all lists these first
 Sell.msg = ""
 
@@ -408,6 +475,7 @@ AH.On("AUCTION_HOUSE_CLOSED", function() Sell.sel, Sell.listings, Sell.pending, 
 --------------------------------------------------------------------------------
 function UI.BuildSell(parent)
     local T = S.T()
+    local bandHit
     local v = CreateFrame("Frame", nil, parent)
     v:SetAllPoints()
 
@@ -528,6 +596,24 @@ function UI.BuildSell(parent)
     warn:SetPoint("TOPRIGHT", -8, -66)
     warn:SetWordWrap(false)
     -- hover the deposit line for how it works
+    -- hover the bottom line when it suggests bandages
+    bandHit = CreateFrame("Frame", nil, sum)
+    bandHit:SetPoint("TOPLEFT", 4, -64)
+    bandHit:SetPoint("TOPRIGHT", -4, -64)
+    bandHit:SetHeight(14)
+    bandHit:Hide()
+    bandHit:SetScript("OnEnter", function(s)
+        local bd = Sell.band
+        if not bd then return end
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Make bandages instead")
+        GameTooltip:AddLine(("%d %s (%d cloth each), sold to a vendor at %s each."):format(bd.crafts, bd.name, bd.per, Short(bd.each)), 1, 1, 1, true)
+        GameTooltip:AddDoubleLine("Bandages + leftover cloth", AH.Money(bd.value), 1, 0.82, 0, 1, 1, 1)
+        GameTooltip:AddDoubleLine("More than selling the cloth", AH.Money(bd.gain), 1, 0.82, 0, 0.31, 0.84, 0.42)
+        if not bd.sure then GameTooltip:AddLine("Open First Aid once so Cys's Auction House knows your recipes.", 0.6, 0.6, 0.6, true) end
+        GameTooltip:Show()
+    end)
+    bandHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
     local depHit = CreateFrame("Frame", nil, sum)
     depHit:SetPoint("TOPLEFT", 4, -30)
     depHit:SetPoint("TOPRIGHT", -4, -30)
@@ -711,7 +797,14 @@ function UI.BuildSell(parent)
         sumDep:SetText(dep and ("|cffd97a7a" .. Short(dep) .. "|r  |cff8a8a8aback if sold|r") or "|cff8a8a8a-|r")
         sumNet:SetText(gross > 0 and AH.Money(net) or "|cff8a8a8a-|r")
         local vend = SellPrice(sel.id)
-        if gross > 0 and vend and vend > 0 then
+        local band = n > 0 and Sell.BandageBest(sel.id, n, math.max(net, (vend or 0) * n)) or nil
+        Sell.band = band
+        bandHit:SetShown(band ~= nil)
+        if band then
+            warn:SetText(("Better: %d %s to a vendor  +%s%s"):format(band.crafts, band.name, Short(band.gain),
+                band.sure and "" or " (if you know it)"))
+            warn:SetTextColor(T.accent[1], T.accent[2], T.accent[3])
+        elseif gross > 0 and vend and vend > 0 then
             local diff = net - vend * n
             if diff > 0 then
                 warn:SetText(("+%s more than a vendor pays"):format(Short(diff)))
@@ -845,7 +938,8 @@ function UI.BuildSell(parent)
                 else
                     local p = AH.GetPrice(e.id) or AH.GetMarketPrice(e.id)
                     local vend = SellPrice(e.id) or 0
-                    if p and p * 0.95 > vend then ids[#ids + 1] = e.id end
+                    local band = p and Sell.BandageBest(e.id, e.count, math.floor(p * 0.95) * e.count)
+                    if p and p * 0.95 > vend and not band then ids[#ids + 1] = e.id end
                 end
             end
         end
