@@ -174,7 +174,8 @@ function Sell.BandageBest(clothID, n, beat)
         local crafts = math.floor(n / r[2])
         if known ~= false and bv and bv > 0 and crafts > 0 then
             local value = crafts * bv + (n - crafts * r[2]) * clothV
-            if not best or value > best.value then
+            -- a tie goes to the recipe using more cloth per bandage (fewer crafts, better skill-ups)
+            if not best or value > best.value or (value == best.value and r[2] > best.per) then
                 best = { id = r[3], crafts = crafts, value = value, sure = known == true, per = r[2], each = bv }
             end
         end
@@ -801,8 +802,8 @@ function UI.BuildSell(parent)
         Sell.band = band
         bandHit:SetShown(band ~= nil)
         if band then
-            warn:SetText(("Better: %d %s to a vendor  +%s%s"):format(band.crafts, band.name, Short(band.gain),
-                band.sure and "" or " (if you know it)"))
+            warn:SetText(("Better: %d %s  +%s%s"):format(band.crafts, band.name, Short(band.gain),
+                band.sure and "" or " (if known)"))
             warn:SetTextColor(T.accent[1], T.accent[2], T.accent[3])
         elseif gross > 0 and vend and vend > 0 then
             local diff = net - vend * n

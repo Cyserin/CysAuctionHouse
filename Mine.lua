@@ -288,6 +288,8 @@ function UI.BuildMine(parent)
     refresh:SetScript("OnLeave", function() GameTooltip:Hide() end)
     local cancelAll = S.Button(card, 208, 24, "Cancel undercut")
     cancelAll:SetPoint("TOPLEFT", refresh, "BOTTOMLEFT", 0, -6)
+    cancelAll.label:SetWidth(196)
+    cancelAll.label:SetWordWrap(false)
     cancelAll:SetScript("OnClick", function() M.CancelUndercut() end)
     cancelAll:SetScript("OnEnter", function(s)
         local a = M.NextUndercut()
@@ -405,7 +407,7 @@ function UI.BuildMine(parent)
         refresh:SetActive(not M.refreshing and activeN > 0)
         local nextU, nU = M.NextUndercut()
         if nextU then
-            cancelAll:SetLabel(("Cancel undercut: %s  (%d)"):format(P.Name(nextU.id) or "next", nU))
+            cancelAll:SetLabel(("Cancel undercut (%d): %s"):format(nU, P.Name(nextU.id) or "next"))
         else
             cancelAll:SetLabel("Cancel undercut")
         end
