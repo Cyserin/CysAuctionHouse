@@ -3,6 +3,8 @@
 -- Pick an item (from the list of your bags, or drop it on the slot) -> the AH's current listings for it
 -- load, the price is set to undercut the cheapest one (or match it when the cheapest is yours), quantity
 -- is everything you carry. Post with your own click. After posting, the next item in your bags is picked.
+-- Smart prices: never below a floor (your own per item, or a % of the usual price, never under the vendor);
+-- Post all walks every worthwhile bag item, one Post click each.
 --------------------------------------------------------------------------------
 local AH = CysAH
 local S = AH.Style
@@ -11,10 +13,14 @@ local UI = AH.UI
 local Sell = {}
 AH.Sell = Sell
 
-local DEFAULTS = { sellDuration = 2, sellUndercut = 1 } -- 24h; undercut by 1 copper
+-- duration 2 (medium); undercut by 1 copper; smart prices never go below the floor (70% of the usual price,
+-- and never under what a vendor pays)
+local DEFAULTS = { sellDuration = 2, sellUndercut = 1, sellSmart = true, sellFloorPct = 70 }
 AH.On("ADDON_LOADED", function(name)
     if name ~= "CysAuctionHouse" then return end
     for k, v in pairs(DEFAULTS) do if AH.settings[k] == nil then AH.settings[k] = v end end
+    AH.db.sellRules = AH.db.sellRules or {} -- [itemID] = { floor = copper you set, dur = 1-3 }
+    AH.db.noSell = AH.db.noSell or {}       -- [itemID] = true: left out of Post all
 end)
 
 -- the game's own duration names (WoW Forever: short / medium / long, e.g. "8 Hours"), shortened to "8h"
@@ -112,6 +118,7 @@ end
 -- Sell.sel = { id, loc, key (ItemKey), commodity, link, icon }
 -- Sell.listings = { { unit, qty, mine } } cheapest first (nil while loading)
 Sell.state = "idle" -- idle / searching / ready / posting / warning
+AH.repost = AH.repost or {} -- [itemID] = true: cancelled in My auctions, Post all lists these first
 Sell.msg = ""
 
 local function Changed() if Sell.OnChange then pcall(Sell.OnChange) end end
@@ -134,7 +141,7 @@ local function Search(tries)
         waitSince = waitSince or GetTime()
         if GetTime() - waitSince > 15 then
             waiting, waitSince = false, nil
-            Sell.listings = {}
+            Sell.listings, Sell.noAnswer = nil, true
             Say("The Auction House is busy (searches are held back after a full scan). You can still post; click the item again later to see the listings.", "ready")
             return
         end
@@ -147,7 +154,16 @@ local function Search(tries)
     token = token + 1
     local mine = token
     local sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }
-    C_AuctionHouse.SendSellSearchQuery(sel.key, sorts, true)
+    -- like the game's own sell window: commodities and other stackables use the normal search,
+    -- only gear (one auction per item level) uses the sell search
+    local info = C_AuctionHouse.GetItemKeyInfo and C_AuctionHouse.GetItemKeyInfo(sel.key)
+    local gear = info and info.isEquipment
+    if gear == nil then gear = sel.gear end
+    if gear and not sel.commodity then
+        C_AuctionHouse.SendSellSearchQuery(sel.key, sorts, true)
+    else
+        C_AuctionHouse.SendSearchQuery(sel.key, sorts, true)
+    end
     -- the game does not always send an event (e.g. results it already had): look for results ourselves
     local function Check()
         if mine ~= token or Sell.state ~= "searching" or Sell.sel ~= sel then return end
@@ -165,7 +181,8 @@ local function Search(tries)
         if tries < 2 then
             Search(tries + 1)
         else
-            Sell.listings = {}
+            -- no answer is not the same as nobody selling: keep the listings unknown
+            Sell.listings, Sell.noAnswer = nil, true
             Say("The Auction House did not answer. Click the item again to retry.", "ready")
         end
     end)
@@ -184,10 +201,10 @@ function Sell.Select(entry)
     local status = C_AuctionHouse.GetItemCommodityStatus(loc)
     Sell.sel = {
         id = entry.id or C_Item.GetItemID(loc), loc = loc, key = C_AuctionHouse.GetItemKeyFromItem(loc),
-        commodity = status == Enum.ItemCommodityStatus.Commodity, link = entry.link or C_Item.GetItemLink(loc),
+        commodity = status == Enum.ItemCommodityStatus.Commodity, link = entry.link or C_Item.GetItemLink(loc), gear = entry.gear,
         icon = entry.icon or C_Item.GetItemIcon(loc),
     }
-    Sell.listings = nil
+    Sell.listings, Sell.noAnswer = nil, nil
     Sell.priceSet = false
     waitSince = nil
     Say("Loading the current listings...", "searching")
@@ -206,7 +223,7 @@ end
 
 local function Loaded(list)
     table.sort(list, function(a, b) return a.unit < b.unit end)
-    Sell.listings = list
+    Sell.listings, Sell.noAnswer = list, nil
     Say("", "ready")
     if Sell.OnListings then pcall(Sell.OnListings) end
 end
@@ -243,17 +260,76 @@ end
 AH.On("ITEM_SEARCH_RESULTS_UPDATED", ReadItem)
 AH.On("ITEM_SEARCH_RESULTS_ADDED", ReadItem)
 
--- Price to suggest: undercut the cheapest listing that isn't yours, or match yours when yours is cheapest;
--- nothing listed -> saved price / usual price / blank
-function Sell.Suggest()
-    local list = Sell.listings
-    if list and list[1] then
-        local first = list[1]
-        if first.mine then return first.unit end
-        return math.max(1, first.unit - (AH.settings.sellUndercut or 1))
+-- Per-item memory: your own floor and the duration you last picked for it
+function Sell.Rule(id, make)
+    local rules = AH.db and AH.db.sellRules
+    if not rules or not id then return nil end
+    if make and not rules[id] then rules[id] = {} end
+    return rules[id]
+end
+function Sell.Dur()
+    local r = Sell.sel and Sell.Rule(Sell.sel.id)
+    return (r and r.dur) or AH.settings.sellDuration or 2
+end
+
+-- The lowest price smart pricing will go to: your own floor for this item, else the higher of
+-- (a % of the usual price) and (the price that still beats a vendor after the 5% cut). Returns price, kind.
+function Sell.Floor(id)
+    local r = Sell.Rule(id)
+    if r and r.floor and r.floor > 0 then return r.floor, "own" end
+    local vend = SellPrice(id)
+    local vendFloor = vend and vend > 0 and (math.ceil(vend / 0.95) + 1) or nil
+    local pct = AH.settings.sellFloorPct or 70
+    local usual = AH.GetMarketPrice(id)
+    local pctFloor = usual and pct > 0 and math.floor(usual * pct / 100) or nil
+    if pctFloor and vendFloor then
+        if vendFloor > pctFloor then return vendFloor, "vendor" end
+        return pctFloor, "pct"
     end
-    local id = Sell.sel and Sell.sel.id
-    return id and (AH.GetPrice(id) or AH.GetMarketPrice(id)) or nil
+    if pctFloor then return pctFloor, "pct" end
+    if vendFloor then return vendFloor, "vendor" end
+end
+
+-- Price to suggest + a short reason why.
+--   Smart: undercut the cheapest listing that isn't yours, but never below the floor (a crashed market is
+--   held at the floor); match yours when yours is already the cheapest; nobody selling -> the usual price.
+--   Not smart: plain undercut / match, nothing listed -> last price or usual price.
+function Sell.Suggest()
+    local sel = Sell.sel
+    if not sel then return nil end
+    local id = sel.id
+    local list = Sell.listings
+    local under = AH.settings.sellUndercut or 1
+    local usual = AH.GetMarketPrice(id)
+    local smart = AH.settings.sellSmart
+    local fl, kind
+    if smart then fl, kind = Sell.Floor(id) end
+    local fname = kind == "own" and "your floor" or kind == "vendor" and "the vendor price"
+        or ((AH.settings.sellFloorPct or 70) .. "% of usual")
+    if list and list[1] then
+        local first
+        for _, e in ipairs(list) do if not e.mine then first = e; break end end
+        if list[1].mine then return list[1].unit, "Yours is already the cheapest, so this matches it." end
+        local target = math.max(1, first.unit - under)
+        if fl and target < fl then
+            return fl, ("The cheapest (%s) is below the floor (%s), so this holds at %s."):format(Short(first.unit), fname, Short(fl))
+        end
+        local why = ("Undercuts the cheapest (%s)."):format(Short(first.unit))
+        if smart and usual and target > usual * 1.5 then why = why .. " Well above the usual " .. Short(usual) .. "." end
+        return target, why
+    end
+    if list then
+        local p = usual or AH.GetPrice(id)
+        if p then
+            if fl and p < fl then p = fl end
+            return p, usual and ("Nobody is selling. Usual price " .. Short(usual) .. ".") or "Nobody is selling. Last price seen."
+        end
+        if fl then return fl, "Nobody is selling and there is no price history, so this starts at the floor." end
+        return nil, "No price known yet. You set it."
+    end
+    local p = AH.GetPrice(id) or usual
+    if Sell.noAnswer then return p, p and "Last price seen (the live listings did not load)." or nil end
+    return p, p and "Last price seen (live listings still loading)." or nil
 end
 
 function Sell.Available()
@@ -265,7 +341,7 @@ end
 function Sell.Deposit(qty)
     local sel = Sell.sel
     if not sel or not Valid(sel.loc) or not qty or qty < 1 then return nil end
-    local dur = AH.settings.sellDuration
+    local dur = Sell.Dur()
     if sel.commodity then return C_AuctionHouse.CalculateCommodityDeposit(sel.id, dur, qty) end
     return C_AuctionHouse.CalculateItemDeposit(sel.loc, dur, qty)
 end
@@ -286,7 +362,7 @@ function Sell.Post(qty, unit)
         Say("Set a quantity and a price first.")
         return
     end
-    local dur = AH.settings.sellDuration
+    local dur = Sell.Dur()
     local status = C_AuctionHouse.GetItemCommodityStatus(sel.loc)
     if status == Enum.ItemCommodityStatus.Commodity then sel.commodity = true
     elseif status == Enum.ItemCommodityStatus.Item then sel.commodity = false end
@@ -314,6 +390,7 @@ AH.On("AUCTION_HOUSE_AUCTION_CREATED", function()
     if Sell.state ~= "posting" then return end
     Sell.pending = nil
     local lp = Sell.lastPost
+    if lp then AH.repost[lp.id] = nil end
     local text = lp and ("Posted %d %s at %s each."):format(lp.qty, P.Name(lp.id) or "", Short(lp.unit)) or "Posted."
     if lp then
         -- what we just posted is now the cheapest listing we know of
@@ -356,7 +433,7 @@ function UI.BuildSell(parent)
     slot:SetScript("OnReceiveDrag", function() Sell.FromCursor() end)
     slot:SetScript("OnClick", function(_, btn)
         if Sell.FromCursor() then return end
-        if btn == "RightButton" then Sell.Select(nil) end
+        if btn == "RightButton" then Sell.queue = nil; Sell.Select(nil) end
     end)
     slot:SetScript("OnEnter", function(s)
         S.SetBorder(s.edges, T.glow)
@@ -378,7 +455,7 @@ function UI.BuildSell(parent)
 
     -- quantity
     local qLabel = S.Text(card, 11, T.accent)
-    qLabel:SetPoint("TOPLEFT", slot, "BOTTOMLEFT", 0, -14)
+    qLabel:SetPoint("TOPLEFT", slot, "BOTTOMLEFT", 0, -10)
     qLabel:SetText("Quantity")
     local qty = S.EditBox(card, 60, 22)
     qty:SetNumeric(true)
@@ -392,10 +469,12 @@ function UI.BuildSell(parent)
 
     -- price
     local pLabel = S.Text(card, 11, T.accent)
-    pLabel:SetPoint("TOPLEFT", qty, "BOTTOMLEFT", 0, -12)
+    pLabel:SetPoint("TOPLEFT", qty, "BOTTOMLEFT", 0, -10)
     pLabel:SetText("Price each")
     local price = S.MoneyInput(card)
     price:SetPoint("TOPLEFT", pLabel, "BOTTOMLEFT", 0, -4)
+    local floorB = S.Button(card, 84, 16, "Set floor")
+    floorB:SetPoint("BOTTOMRIGHT", price, "TOPRIGHT", 0, 3)
     local under = S.Button(card, 100, 20, "Undercut")
     under:SetPoint("TOPLEFT", price, "BOTTOMLEFT", 0, -6)
     local match = S.Button(card, 100, 20, "Match")
@@ -403,7 +482,7 @@ function UI.BuildSell(parent)
 
     -- duration
     local dLabel = S.Text(card, 11, T.accent)
-    dLabel:SetPoint("TOPLEFT", under, "BOTTOMLEFT", 0, -12)
+    dLabel:SetPoint("TOPLEFT", under, "BOTTOMLEFT", 0, -10)
     dLabel:SetText("Duration")
     local durB = {}
     for i, d in ipairs(DURATIONS) do
@@ -413,16 +492,61 @@ function UI.BuildSell(parent)
         durB[i] = b
     end
 
-    local info = S.Text(card, 11, T.text)
-    info:SetPoint("TOPLEFT", durB[1], "BOTTOMLEFT", 0, -12)
+    -- price guide: usual price + floor, then why this price was suggested
+    local info = S.Text(card, 10, T.dim)
+    info:SetPoint("TOPLEFT", durB[1], "BOTTOMLEFT", 0, -10)
     info:SetWidth(208)
-    info:SetSpacing(3)
-    local warn = S.Text(card, 10, T.danger)
-    warn:SetPoint("TOPLEFT", info, "BOTTOMLEFT", 0, -6)
-    warn:SetWidth(208)
+    info:SetWordWrap(false)
+    local why = S.Text(card, 9, T.dim)
+    why:SetPoint("TOPLEFT", info, "BOTTOMLEFT", 0, -3)
+    why:SetWidth(208)
+    why:SetMaxLines(2)
+
+    -- money summary: what the post sells for, what the AH takes, the deposit, what you get
+    local sum = S.Panel(card, T.field, T.line)
+    sum:SetPoint("BOTTOMLEFT", card, "BOTTOMLEFT", 12, 82)
+    sum:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", -12, 82)
+    sum:SetHeight(80)
+    local function Row(y, label, size, lcol)
+        local l = S.Text(sum, size or 10, lcol or T.dim)
+        l:SetPoint("TOPLEFT", 8, y)
+        l:SetText(label)
+        local r = S.Text(sum, size or 10, T.text, "RIGHT")
+        r:SetPoint("TOPRIGHT", -8, y)
+        return l, r
+    end
+    local _, sumGross = Row(-6, "Sells for")
+    local _, sumCut = Row(-19, "AH cut (5%)")
+    local depL, sumDep = Row(-32, "Deposit")
+    local sep = S.Tex(sum, "ARTWORK", T.line)
+    sep:SetPoint("TOPLEFT", 8, -46)
+    sep:SetPoint("TOPRIGHT", -8, -46)
+    sep:SetHeight(1)
+    local _, sumNet = Row(-50, "You get", 12, T.accent)
+    local warn = S.Text(sum, 9, T.green)
+    warn:SetPoint("TOPLEFT", 8, -66)
+    warn:SetPoint("TOPRIGHT", -8, -66)
+    warn:SetWordWrap(false)
+    -- hover the deposit line for how it works
+    local depHit = CreateFrame("Frame", nil, sum)
+    depHit:SetPoint("TOPLEFT", 4, -30)
+    depHit:SetPoint("TOPRIGHT", -4, -30)
+    depHit:SetHeight(14)
+    depHit:SetScript("OnEnter", function(s)
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Deposit")
+        GameTooltip:AddLine("Paid when you post. You get it back when the auction sells; the Auction House keeps it if the auction expires or you cancel it.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    depHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     local post = S.Button(card, 208, 28, "Post")
     post:SetPoint("BOTTOMLEFT", 12, 34)
+    local skip = S.Button(card, 56, 28, "Skip")
+    skip:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", -12, 34)
+    skip:Hide()
+    local qText = S.Text(card, 10, T.accent)
+    qText:SetPoint("BOTTOMLEFT", post, "TOPLEFT", 0, 5)
     local msg = S.Text(card, 10, T.accent)
     msg:SetPoint("TOPLEFT", post, "BOTTOMLEFT", 0, -6)
     msg:SetWidth(208)
@@ -437,7 +561,7 @@ function UI.BuildSell(parent)
     lTitle:SetPoint("TOPLEFT", 12, -10)
     lTitle:SetText("Current listings")
     local lNote = S.Text(right, 10, T.dim, "RIGHT")
-    lNote:SetPoint("TOPRIGHT", -12, -11)
+    lNote:SetPoint("TOPRIGHT", -84, -11)
     lNote:SetText("Click a price to undercut it")
 
     local function Header(parentF, y, cols)
@@ -479,7 +603,9 @@ function UI.BuildSell(parent)
     bTitle:SetPoint("TOPLEFT", 12, bTop - 4)
     bTitle:SetText("Your bags")
     local bNote = S.Text(right, 10, T.dim, "RIGHT")
-    bNote:SetPoint("TOPRIGHT", -12, bTop - 5)
+    bNote:SetPoint("TOPRIGHT", -84, bTop - 5)
+    local postAll = S.Button(right, 64, 18, "Post all")
+    postAll:SetPoint("TOPRIGHT", -12, bTop - 2)
     Header(right, bTop - 22, { { "Item", 34, "LEFT" }, { "AH each", -214, "RIGHT" }, { "Vendor each", -114, "RIGHT" }, { "Worth", -16, "RIGHT" } })
 
     local brows = {}
@@ -504,11 +630,23 @@ function UI.BuildSell(parent)
             if s.entry and s.entry.link then
                 GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
                 GameTooltip:SetHyperlink(s.entry.link)
+                GameTooltip:AddLine(AH.db.noSell[s.entry.id] and "Left out of Post all. Right-click to put it back."
+                    or "Right-click: leave out of Post all.", 0.6, 0.6, 0.6)
                 GameTooltip:Show()
             end
         end)
         r:SetScript("OnLeave", function(s) s.hl:Hide(); GameTooltip:Hide() end)
-        r:SetScript("OnClick", function(s) if s.entry then Sell.Select(s.entry) end end)
+        r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        r:SetScript("OnClick", function(s, btn)
+            if not s.entry then return end
+            if btn == "RightButton" then
+                local id = s.entry.id
+                AH.db.noSell[id] = (not AH.db.noSell[id]) or nil
+                if UI.PaintSellBags then UI.PaintSellBags() end
+                return
+            end
+            Sell.Select(s.entry)
+        end)
         brows[i] = r
     end
     right:EnableMouseWheel(true)
@@ -523,7 +661,12 @@ function UI.BuildSell(parent)
     local function PaintForm()
         local sel = Sell.sel
         local on = sel ~= nil
-        for _, w in ipairs({ qty, maxB, price, under, match }) do w:SetShown(on) end
+        local q = Sell.queue
+        post:SetWidth(q and 146 or 208)
+        skip:SetShown(q ~= nil)
+        qText:SetText(q and ("Post all:  %d of %d"):format(math.min(q.i, #q.ids), #q.ids) or "")
+        postAll:SetLabel(q and "Stop" or "Post all")
+        for _, w in ipairs({ qty, maxB, price, under, match, floorB }) do w:SetShown(on) end
         qLabel:SetShown(on); pLabel:SetShown(on); ofN:SetShown(on)
         if not sel then
             slot.icon:SetTexture(nil)
@@ -532,7 +675,8 @@ function UI.BuildSell(parent)
             name:SetTextColor(T.text[1], T.text[2], T.text[3])
             have:SetText("from your bags on the right,\nor drop one on the slot")
             info:SetText("")
-            warn:SetText("")
+            why:SetText("")
+            sum:Hide()
             post:SetLabel("Post")
             post:SetActive(false)
             msg:SetText(Sell.msg or "")
@@ -549,21 +693,42 @@ function UI.BuildSell(parent)
         ofN:SetText("of " .. avail)
         local n, unit = Total()
         local dep = Sell.Deposit(n)
-        local lines = {}
-        if n > 0 and unit > 0 then
-            lines[#lines + 1] = "Total  |cffffffff" .. AH.Money(unit * n) .. "|r"
-            lines[#lines + 1] = "After the 5% cut  |cffffffff" .. AH.Money(math.floor(unit * n * 0.95)) .. "|r"
-        end
-        if dep then lines[#lines + 1] = "Deposit  |cffffffff" .. AH.Money(dep) .. "|r" end
-        info:SetText(table.concat(lines, "\n"))
+        local usual = AH.GetMarketPrice(sel.id)
+        local fl, kind
+        if AH.settings.sellSmart then fl, kind = Sell.Floor(sel.id) end
+        local ref = {}
+        if usual then ref[#ref + 1] = "Usual |cffffffff" .. Short(usual) .. "|r" end
+        if fl then ref[#ref + 1] = (kind == "own" and "Your floor " or "Floor ") .. "|cffffffff" .. Short(fl) .. "|r" end
+        info:SetText(table.concat(ref, "   |cff555555|||r   "))
+        why:SetText(Sell.why or "")
+        local rule = Sell.Rule(sel.id)
+        floorB:SetLabel(rule and rule.floor and "Clear floor" or "Set floor")
+        sum:Show()
+        local gross = (n > 0 and unit > 0) and unit * n or 0
+        local net = math.floor(gross * 0.95)
+        sumGross:SetText(gross > 0 and AH.Money(gross) or "|cff8a8a8a-|r")
+        sumCut:SetText(gross > 0 and ("|cffd97a7a-" .. Short(gross - net) .. "|r") or "|cff8a8a8a-|r")
+        sumDep:SetText(dep and ("|cffd97a7a" .. Short(dep) .. "|r  |cff8a8a8aback if sold|r") or "|cff8a8a8a-|r")
+        sumNet:SetText(gross > 0 and AH.Money(net) or "|cff8a8a8a-|r")
         local vend = SellPrice(sel.id)
-        if unit > 0 and vend and vend > 0 and unit * 0.95 <= vend then
-            warn:SetText(("Below what a vendor pays (%s each) - selling to a vendor gives more."):format(Short(vend)))
+        if gross > 0 and vend and vend > 0 then
+            local diff = net - vend * n
+            if diff > 0 then
+                warn:SetText(("+%s more than a vendor pays"):format(Short(diff)))
+                warn:SetTextColor(T.green[1], T.green[2], T.green[3])
+            else
+                warn:SetText(("A vendor pays more (%s each)"):format(Short(vend)))
+                warn:SetTextColor(T.danger[1], T.danger[2], T.danger[3])
+            end
+        elseif gross > 0 then
+            warn:SetText("Vendors don't buy this")
+            warn:SetTextColor(T.dim[1], T.dim[2], T.dim[3])
         else
-            warn:SetText("")
+            warn:SetText("Set a quantity and price")
+            warn:SetTextColor(T.dim[1], T.dim[2], T.dim[3])
         end
         for _, b in ipairs(durB) do
-            local on2 = b.value == AH.settings.sellDuration
+            local on2 = b.value == Sell.Dur()
             S.SetBorder(b.edges, on2 and T.glow or T.line)
         end
         if Sell.state == "warning" then
@@ -593,6 +758,7 @@ function UI.BuildSell(parent)
         end
         if not Sell.sel then lEmpty:SetText("")
         elseif Sell.state == "searching" then lEmpty:SetText("Loading...")
+        elseif Sell.noAnswer then lEmpty:SetText("The listings did not load. Click the item to try again.")
         elseif list and #list == 0 then lEmpty:SetText("Nobody is selling this right now - you set the price.")
         else lEmpty:SetText("") end
     end
@@ -608,6 +774,7 @@ function UI.BuildSell(parent)
                 r.icon:SetTexture(e.icon or 134400)
                 local nm = P.Name(e.id) or (e.link and e.link:match("%[(.-)%]")) or ""
                 if e.count > 1 then nm = nm .. " |cff8a8a8ax" .. e.count .. "|r" end
+                if AH.db.noSell[e.id] then nm = nm .. " |cff8a8a8a(left out)|r" end
                 r.name:SetText(nm)
                 local col = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
                 if col then r.name:SetTextColor(col.r, col.g, col.b) else r.name:SetTextColor(T.text[1], T.text[2], T.text[3]) end
@@ -634,20 +801,22 @@ function UI.BuildSell(parent)
     end
 
     function UI.PaintSell() PaintForm(); PaintListings() end
+    UI.PaintSellBags = PaintBags
     Sell.OnChange = UI.PaintSell
 
     -- listings arrived: fill the price unless the player already typed one
-    Sell.OnListings = function()
-        if not Sell.priceSet then
-            local s = Sell.Suggest()
-            if s then price:SetAmount(s) end
-        end
+    local function Resuggest()
+        local s, why = Sell.Suggest()
+        Sell.why = why
+        if not Sell.priceSet and s then price:SetAmount(s) end
         UI.PaintSell()
     end
+    Sell.OnListings = Resuggest
 
     local lastSelID
     local baseSelect = Sell.Select
     Sell.Select = function(entry)
+        Sell.why = nil
         baseSelect(entry)
         if Sell.sel then
             if Sell.sel.id ~= lastSelID then
@@ -665,8 +834,50 @@ function UI.BuildSell(parent)
         PaintBags()
     end
 
-    -- after posting: next item in your bags (the same one if some are left)
+    -- Post all: a list of every bag item worth listing (an AH price that beats the vendor, not left out);
+    -- each Post click lists one, then the next item is picked and priced from its live listings
+    function Sell.BuildQueue()
+        local ids, first = {}, {}
+        for _, e in ipairs(Sell.BagItems()) do
+            if not AH.db.noSell[e.id] then
+                if AH.repost[e.id] then
+                    first[#first + 1] = e.id -- cancelled undercut auctions go first
+                else
+                    local p = AH.GetPrice(e.id) or AH.GetMarketPrice(e.id)
+                    local vend = SellPrice(e.id) or 0
+                    if p and p * 0.95 > vend then ids[#ids + 1] = e.id end
+                end
+            end
+        end
+        for i = #first, 1, -1 do table.insert(ids, 1, first[i]) end
+        return ids
+    end
+    local function QueueNext()
+        local q = Sell.queue
+        if not q then return end
+        bags = Sell.BagItems()
+        while q.i <= #q.ids do
+            local id = q.ids[q.i]
+            for _, e in ipairs(bags) do
+                if e.id == id then lastSelID = nil; Sell.Select(e); PaintBags(); return end
+            end
+            q.i = q.i + 1
+        end
+        Sell.queue = nil
+        Sell.Select(nil)
+        Sell.msg = ("Post all done: %d posted."):format(q.posted)
+        UI.PaintSell()
+        PaintBags()
+    end
+
+    -- after posting: next item in the Post all list, or the next item in your bags (the same one if some are left)
     Sell.OnPosted = function()
+        if Sell.queue then
+            Sell.queue.i = Sell.queue.i + 1
+            Sell.queue.posted = Sell.queue.posted + 1
+            QueueNext()
+            return
+        end
         bags = Sell.BagItems()
         local nextE
         local prevID = Sell.lastPost and Sell.lastPost.id
@@ -690,8 +901,13 @@ function UI.BuildSell(parent)
         if list and list[1] then price:SetAmount(list[1].unit); Sell.priceSet = true; PaintForm() end
     end)
     for _, b in ipairs(durB) do
-        b:SetScript("OnClick", function() AH.settings.sellDuration = b.value; PaintForm() end)
-        b:SetScript("OnLeave", function(s) S.SetBorder(s.edges, s.value == AH.settings.sellDuration and T.glow or T.line) end)
+        b:SetScript("OnClick", function()
+            AH.settings.sellDuration = b.value
+            local rr = Sell.sel and Sell.Rule(Sell.sel.id, true)
+            if rr then rr.dur = b.value end
+            PaintForm()
+        end)
+        b:SetScript("OnLeave", function(s) S.SetBorder(s.edges, s.value == Sell.Dur() and T.glow or T.line) end)
     end
     for _, r in ipairs(lrows) do
         r:SetScript("OnClick", function(s)
@@ -706,6 +922,87 @@ function UI.BuildSell(parent)
         local n, unit = Total()
         Sell.Post(n, unit)
     end)
+    floorB:SetScript("OnClick", function()
+        local sel = Sell.sel
+        if not sel then return end
+        local rr = Sell.Rule(sel.id, true)
+        if rr.floor then
+            rr.floor = nil
+        else
+            local _, unit = Total()
+            if unit and unit > 0 then rr.floor = unit end
+        end
+        Resuggest()
+    end)
+    floorB:HookScript("OnEnter", function(s)
+        GameTooltip:SetOwner(s, "ANCHOR_TOP")
+        GameTooltip:SetText("Floor for this item")
+        GameTooltip:AddLine("Set floor: the price in the box becomes the lowest this item is ever listed for. Smart prices hold here when others sell cheaper.", 1, 1, 1, true)
+        GameTooltip:AddLine("Without one, the floor is a % of the usual price (Options), and never under what a vendor pays.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    floorB:HookScript("OnLeave", function() GameTooltip:Hide() end)
+
+    skip:SetScript("OnClick", function()
+        if not Sell.queue or Sell.state == "posting" then return end
+        Sell.pending = nil
+        Sell.queue.i = Sell.queue.i + 1
+        QueueNext()
+    end)
+    postAll:SetScript("OnClick", function()
+        if Sell.queue then
+            Sell.queue = nil
+            Sell.Select(nil)
+            PaintBags()
+            return
+        end
+        local ids = Sell.BuildQueue()
+        if #ids == 0 then
+            Sell.msg = "Nothing to post: no item in your bags has an AH price above what a vendor pays."
+            UI.PaintSell()
+            return
+        end
+        Sell.queue = { ids = ids, i = 1, posted = 0 }
+        QueueNext()
+    end)
+    postAll:HookScript("OnEnter", function(s)
+        GameTooltip:SetOwner(s, "ANCHOR_TOP")
+        GameTooltip:SetText("Post all")
+        GameTooltip:AddLine("Goes through every item in your bags with an AH price above what a vendor pays. Each item is priced from its live listings; you click Post (or Skip) for each one.", 1, 1, 1, true)
+        GameTooltip:AddLine("Right-click an item in the list to leave it out.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    postAll:HookScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- Options: smart prices, undercut amount, floor %
+    local optB = S.Button(right, 64, 18, "Options")
+    optB:SetPoint("TOPRIGHT", -12, -8)
+    local opt = S.Panel(right, T.card, T.glow)
+    opt:SetPoint("TOPRIGHT", optB, "BOTTOMRIGHT", 0, -4)
+    opt:SetSize(240, 150)
+    opt:SetFrameLevel(right:GetFrameLevel() + 30)
+    opt:EnableMouse(true)
+    opt:Hide()
+    local oTitle = S.Text(opt, 11, T.accent)
+    oTitle:SetPoint("TOPLEFT", 12, -10)
+    oTitle:SetText("Selling")
+    local smart = S.Check(opt, "Smart prices (hold at the floor)", function() return AH.settings.sellSmart end,
+        function(val) AH.settings.sellSmart = val; Resuggest() end)
+    smart:SetPoint("TOPLEFT", 12, -30)
+    local und = S.Stepper(opt, "Undercut by", { 1, 5, 10, 50, 100, 500, 1000, 5000, 10000 },
+        function() return AH.settings.sellUndercut or 1 end, function(val) AH.settings.sellUndercut = val; Resuggest() end, Short)
+    und:SetPoint("TOPLEFT", 12, -56)
+    local fp = S.Stepper(opt, "Floor (% of usual)", { 0, 40, 50, 60, 70, 80, 90, 100 },
+        function() return AH.settings.sellFloorPct or 70 end, function(val) AH.settings.sellFloorPct = val; Resuggest() end,
+        function(val) return val == 0 and "off" or (val .. "%") end)
+    fp:SetPoint("TOPLEFT", 12, -82)
+    local oNote = S.Text(opt, 10, T.dim)
+    oNote:SetPoint("TOPLEFT", 12, -108)
+    oNote:SetWidth(216)
+    oNote:SetText("The floor never goes under what a vendor pays. Set floor (above the price) gives one item its own floor.")
+    optB:SetScript("OnClick", function() opt:SetShown(not opt:IsShown()) end)
+    v:HookScript("OnHide", function() opt:Hide() end)
+
     right:SetScript("OnMouseWheel", function(_, d)
         bOff = math.max(0, bOff - d * 3)
         PaintBags()
