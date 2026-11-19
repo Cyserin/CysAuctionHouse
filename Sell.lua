@@ -131,8 +131,41 @@ local BANDAGES = {
     { 4338, 1, 8544, 10840 },  { 4338, 2, 8545, 10841 },  -- Mageweave / Heavy Mageweave
     { 14047, 1, 14529, 18629 }, { 14047, 2, 14530, 18630 }, -- Runecloth / Heavy Runecloth
 }
-local BY_CLOTH = {}
+-- Ore into bars: Mining smelting (our own table). Bars sell on the AH, so a bar is worth its AH price after
+-- the 5% cut, or what a vendor pays if that is more. { ore, ore per bar, bar item, smelt spell }
+local SMELT = {
+    { 2770, 1, 2840, 2657 },   -- Copper
+    { 2771, 1, 3576, 3304 },   -- Tin
+    { 2775, 1, 2842, 2658 },   -- Silver
+    { 2772, 1, 3575, 3307 },   -- Iron
+    { 2776, 1, 3577, 3308 },   -- Gold
+    { 3858, 1, 3860, 10097 },  -- Mithril
+    { 7911, 1, 6037, 10098 },  -- Truesilver
+    { 10620, 1, 12359, 16153 }, -- Thorium
+    { 11370, 8, 11371, 14891 }, -- Dark Iron (only at the Black Forge)
+}
+-- Stone into sharpening / grinding stones: Blacksmithing (our own table; weightstones need cloth, left out).
+-- Valued like bars: AH price after the cut, or the vendor price if more. { stone, stones per item, item, spell }
+local STONES = {
+    { 2835, 1, 2862, 2660 },   { 2835, 2, 3470, 3320 },   -- Rough: sharpening / grinding
+    { 2836, 1, 2863, 2665 },   { 2836, 2, 3478, 3326 },   -- Coarse
+    { 2838, 1, 2871, 2674 },   { 2838, 3, 3486, 3337 },   -- Heavy
+    { 7912, 1, 7964, 9918 },   { 7912, 4, 7966, 9920 },   -- Solid
+    { 12365, 1, 12404, 16641 }, { 12365, 4, 12644, 16639 }, -- Dense
+}
+local BY_CLOTH = {} -- material -> its recipes (cloth and ore)
 for _, r in ipairs(BANDAGES) do
+    r.kind = "bandage"
+    BY_CLOTH[r[1]] = BY_CLOTH[r[1]] or {}
+    table.insert(BY_CLOTH[r[1]], r)
+end
+for _, r in ipairs(SMELT) do
+    r.kind = "bar"
+    BY_CLOTH[r[1]] = BY_CLOTH[r[1]] or {}
+    table.insert(BY_CLOTH[r[1]], r)
+end
+for _, r in ipairs(STONES) do
+    r.kind = "stone"
     BY_CLOTH[r[1]] = BY_CLOTH[r[1]] or {}
     table.insert(BY_CLOTH[r[1]], r)
 end
@@ -152,9 +185,11 @@ end
 local function ReadRecipes()
     if not (C_TradeSkillUI and C_TradeSkillUI.GetRecipeInfo and AH.db) then return end
     AH.db.recipes = AH.db.recipes or {}
-    for _, r in ipairs(BANDAGES) do
-        local ok, info = pcall(C_TradeSkillUI.GetRecipeInfo, r[4])
-        if ok and info then AH.db.recipes[r[4]] = info.learned and true or false end
+    for _, list in ipairs({ BANDAGES, SMELT, STONES }) do
+        for _, r in ipairs(list) do
+            local ok, info = pcall(C_TradeSkillUI.GetRecipeInfo, r[4])
+            if ok and info then AH.db.recipes[r[4]] = info.learned and true or false end
+        end
     end
 end
 AH.On("TRADE_SKILL_SHOW", function() C_Timer.After(0.5, ReadRecipes) end)
@@ -171,18 +206,26 @@ function Sell.BandageBest(clothID, n, beat)
         local known = KnowsRecipe(r[4])
         local bv = SellPrice(r[3])
         if bv == nil and C_Item and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(r[3]) end
+        local onAH = false
+        if r.kind ~= "bandage" then
+            -- bars and stones: the AH price after the cut when that beats the vendor
+            local p = AH.GetPrice(r[3]) or AH.GetMarketPrice(r[3])
+            local net = p and math.floor(p * 0.95)
+            if net and net > (bv or 0) then bv, onAH = net, true end
+        end
         local crafts = math.floor(n / r[2])
         if known ~= false and bv and bv > 0 and crafts > 0 then
             local value = crafts * bv + (n - crafts * r[2]) * clothV
             -- a tie goes to the recipe using more cloth per bandage (fewer crafts, better skill-ups)
             if not best or value > best.value or (value == best.value and r[2] > best.per) then
-                best = { id = r[3], crafts = crafts, value = value, sure = known == true, per = r[2], each = bv }
+                best = { id = r[3], crafts = crafts, value = value, sure = known == true, per = r[2], each = bv,
+                    kind = r.kind, onAH = onAH, spell = r[4] }
             end
         end
     end
     if best and best.value > (beat or 0) then
         best.gain = best.value - (beat or 0)
-        best.name = (P and P.Name and P.Name(best.id)) or (C_Item.GetItemNameByID and C_Item.GetItemNameByID(best.id)) or "bandages"
+        best.name = (P and P.Name and P.Name(best.id)) or (C_Item.GetItemNameByID and C_Item.GetItemNameByID(best.id)) or (best.kind == "bar" and "bars" or best.kind == "stone" and "stones" or "bandages")
         return best
     end
 end
@@ -607,11 +650,30 @@ function UI.BuildSell(parent)
         local bd = Sell.band
         if not bd then return end
         GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Make bandages instead")
-        GameTooltip:AddLine(("%d %s (%d cloth each), sold to a vendor at %s each."):format(bd.crafts, bd.name, bd.per, Short(bd.each)), 1, 1, 1, true)
-        GameTooltip:AddDoubleLine("Bandages + leftover cloth", AH.Money(bd.value), 1, 0.82, 0, 1, 1, 1)
-        GameTooltip:AddDoubleLine("More than selling the cloth", AH.Money(bd.gain), 1, 0.82, 0, 0.31, 0.84, 0.42)
-        if not bd.sure then GameTooltip:AddLine("Open First Aid once so Cys's Auction House knows your recipes.", 0.6, 0.6, 0.6, true) end
+        if bd.kind == "bar" or bd.kind == "stone" then
+            local bar = bd.kind == "bar"
+            local mat = bar and "ore" or "stone"
+            GameTooltip:SetText(bar and "Smelt into bars instead" or "Make " .. bd.name .. "s instead")
+            GameTooltip:AddLine(("%d %s (%d %s each), %s at %s each."):format(bd.crafts, bd.name, bd.per, mat,
+                bd.onAH and "sold on the AH" or "sold to a vendor", Short(bd.each)), 1, 1, 1, true)
+            if bd.onAH then GameTooltip:AddLine("AH price after the 5% cut.", 0.6, 0.6, 0.6, true) end
+            GameTooltip:AddDoubleLine(bd.per > 1 and ((bar and "Bars" or "Stones") .. " + leftover " .. mat) or (bar and "Bars" or "Stones"),
+                AH.Money(bd.value), 1, 0.82, 0, 1, 1, 1)
+            GameTooltip:AddDoubleLine("More than selling the " .. mat, AH.Money(bd.gain), 1, 0.82, 0, 0.31, 0.84, 0.42)
+            if bar then
+                GameTooltip:AddLine(bd.spell == 14891 and "Dark Iron only smelts at the Black Forge in Blackrock Depths."
+                    or "Smelting needs a forge.", 0.6, 0.6, 0.6, true)
+            else
+                GameTooltip:AddLine("Blacksmithing, with a Blacksmith Hammer in your bags.", 0.6, 0.6, 0.6, true)
+            end
+            if not bd.sure then GameTooltip:AddLine(("Open %s once so Cys's Auction House knows your recipes."):format(bar and "Mining" or "Blacksmithing"), 0.6, 0.6, 0.6, true) end
+        else
+            GameTooltip:SetText("Make bandages instead")
+            GameTooltip:AddLine(("%d %s (%d cloth each), sold to a vendor at %s each."):format(bd.crafts, bd.name, bd.per, Short(bd.each)), 1, 1, 1, true)
+            GameTooltip:AddDoubleLine("Bandages + leftover cloth", AH.Money(bd.value), 1, 0.82, 0, 1, 1, 1)
+            GameTooltip:AddDoubleLine("More than selling the cloth", AH.Money(bd.gain), 1, 0.82, 0, 0.31, 0.84, 0.42)
+            if not bd.sure then GameTooltip:AddLine("Open First Aid once so Cys's Auction House knows your recipes.", 0.6, 0.6, 0.6, true) end
+        end
         GameTooltip:Show()
     end)
     bandHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
