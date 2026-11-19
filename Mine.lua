@@ -60,7 +60,7 @@ function M.Undercut(a)
     if a.status == 1 or a.status == -1 then return nil end
     local other = M.cheapOther[a.id]
     if other == nil then
-        local r = AH.realm.items[a.id]
+        local r = P.Get(a.key or a.id) -- per suffix for random-suffix gear
         if r and r.p and r.t and time() - r.t < 3600 and r.p < a.unit then other = r.p end
     end
     if other and other < a.unit then return other end

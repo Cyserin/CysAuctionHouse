@@ -42,6 +42,15 @@ local function Short(copper)
 end
 Sell.Short = Short
 
+-- How often this item sells on the AH (0-1, History.lua), or nil while unknown
+local function Rate(id)
+    if not AH.GetSellRate then return nil end
+    local ok, r = pcall(AH.GetSellRate, id)
+    return ok and r or nil
+end
+local function Pct(r) return r and (math.floor(r * 100 + 0.5) .. "%") or "?" end
+Sell.Pct = Pct
+
 local function SellPrice(id)
     local v
     if GetItemInfo then v = select(11, GetItemInfo(id)) end
@@ -84,7 +93,7 @@ function Sell.BagItems()
     end
     -- most valuable first (AH price x count), items without a price after
     table.sort(out, function(a, b)
-        local pa, pb = (AH.GetPrice(a.id) or 0) * a.count, (AH.GetPrice(b.id) or 0) * b.count
+        local pa, pb = (AH.GetPrice(a.link or a.id) or 0) * a.count, (AH.GetPrice(b.link or b.id) or 0) * b.count
         if pa ~= pb then return pa > pb end
         return (P.Name(a.id) or "") < (P.Name(b.id) or "")
     end)
@@ -206,11 +215,13 @@ function Sell.BandageBest(clothID, n, beat)
         local known = KnowsRecipe(r[4])
         local bv = SellPrice(r[3])
         if bv == nil and C_Item and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(r[3]) end
-        local onAH = false
+        local onAH, rate = false, nil
         if r.kind ~= "bandage" then
-            -- bars and stones: the AH price after the cut when that beats the vendor
+            -- bars and stones: the AH price after the cut, times how often it sells (when known),
+            -- when that beats the vendor (a vendor always buys)
             local p = AH.GetPrice(r[3]) or AH.GetMarketPrice(r[3])
-            local net = p and math.floor(p * 0.95)
+            rate = Rate(r[3])
+            local net = p and math.floor(p * 0.95 * (rate or 1))
             if net and net > (bv or 0) then bv, onAH = net, true end
         end
         local crafts = math.floor(n / r[2])
@@ -219,7 +230,7 @@ function Sell.BandageBest(clothID, n, beat)
             -- a tie goes to the recipe using more cloth per bandage (fewer crafts, better skill-ups)
             if not best or value > best.value or (value == best.value and r[2] > best.per) then
                 best = { id = r[3], crafts = crafts, value = value, sure = known == true, per = r[2], each = bv,
-                    kind = r.kind, onAH = onAH, spell = r[4] }
+                    kind = r.kind, onAH = onAH, spell = r[4], rate = onAH and rate or nil }
             end
         end
     end
@@ -229,6 +240,23 @@ function Sell.BandageBest(clothID, n, beat)
         return best
     end
 end
+-- For the item tooltip (anywhere, from the last scan's prices): n of this material sold as is (AH after the
+-- cut, or vendor if more) vs the best known recipe. Returns best, asIs, n, stack (n was guessed) or nil.
+function Sell.CraftAdvice(id, n)
+    if not BY_CLOTH[id] then return nil end
+    local stack = not n or n <= 0
+    if stack then n = 20 end
+    local p = AH.GetPrice(id) or AH.GetMarketPrice(id)
+    local rate = Rate(id)
+    local net = p and math.floor(p * 0.95 * (rate or 1)) or 0
+    local vend = SellPrice(id) or 0
+    local each = math.max(net, vend)
+    local best = Sell.BandageBest(id, n, -1)
+    if not best then return nil end
+    best.matRate = net > vend and rate or nil
+    return best, each * n, n, stack
+end
+
 AH.repost = AH.repost or {} -- [itemID] = true: cancelled in My auctions, Post all lists these first
 Sell.msg = ""
 
@@ -385,13 +413,13 @@ end
 
 -- The lowest price smart pricing will go to: your own floor for this item, else the higher of
 -- (a % of the usual price) and (the price that still beats a vendor after the 5% cut). Returns price, kind.
-function Sell.Floor(id)
+function Sell.Floor(id, pk) -- pk: link / price key for suffixed gear (prices), id: rules + vendor
     local r = Sell.Rule(id)
     if r and r.floor and r.floor > 0 then return r.floor, "own" end
     local vend = SellPrice(id)
     local vendFloor = vend and vend > 0 and (math.ceil(vend / 0.95) + 1) or nil
     local pct = AH.settings.sellFloorPct or 70
-    local usual = AH.GetMarketPrice(id)
+    local usual = AH.GetMarketPrice(pk or id)
     local pctFloor = usual and pct > 0 and math.floor(usual * pct / 100) or nil
     if pctFloor and vendFloor then
         if vendFloor > pctFloor then return vendFloor, "vendor" end
@@ -409,12 +437,13 @@ function Sell.Suggest()
     local sel = Sell.sel
     if not sel then return nil end
     local id = sel.id
+    local pk = sel.link or id
     local list = Sell.listings
     local under = AH.settings.sellUndercut or 1
-    local usual = AH.GetMarketPrice(id)
+    local usual = AH.GetMarketPrice(pk)
     local smart = AH.settings.sellSmart
     local fl, kind
-    if smart then fl, kind = Sell.Floor(id) end
+    if smart then fl, kind = Sell.Floor(id, pk) end
     local fname = kind == "own" and "your floor" or kind == "vendor" and "the vendor price"
         or ((AH.settings.sellFloorPct or 70) .. "% of usual")
     if list and list[1] then
@@ -430,7 +459,7 @@ function Sell.Suggest()
         return target, why
     end
     if list then
-        local p = usual or AH.GetPrice(id)
+        local p = usual or AH.GetPrice(pk)
         if p then
             if fl and p < fl then p = fl end
             return p, usual and ("Nobody is selling. Usual price " .. Short(usual) .. ".") or "Nobody is selling. Last price seen."
@@ -438,7 +467,7 @@ function Sell.Suggest()
         if fl then return fl, "Nobody is selling and there is no price history, so this starts at the floor." end
         return nil, "No price known yet. You set it."
     end
-    local p = AH.GetPrice(id) or usual
+    local p = AH.GetPrice(pk) or usual
     if Sell.noAnswer then return p, p and "Last price seen (the live listings did not load)." or nil end
     return p, p and "Last price seen (live listings still loading)." or nil
 end
@@ -482,7 +511,7 @@ function Sell.Post(qty, unit)
     else ok = C_AuctionHouse.PostItem(sel.loc, dur, qty, nil, unit) end
     if ok then
         Sell.pending = { commodity = sel.commodity, loc = sel.loc, dur = dur, qty = qty, unit = unit }
-        Sell.lastPost = { id = sel.id, qty = qty, unit = unit }
+        Sell.lastPost = { id = sel.id, key = sel.link or sel.id, qty = qty, unit = unit }
         Say("Posting...", "posting")
     else
         Say("The game did not accept this post.", "ready")
@@ -505,8 +534,8 @@ AH.On("AUCTION_HOUSE_AUCTION_CREATED", function()
     local text = lp and ("Posted %d %s at %s each."):format(lp.qty, P.Name(lp.id) or "", Short(lp.unit)) or "Posted."
     if lp then
         -- what we just posted is now the cheapest listing we know of
-        local r = AH.realm.items[lp.id]
-        if not r or not r.p or lp.unit < r.p then P.Record(lp.id, lp.unit, nil, nil, nil) end
+        local r = P.Get(lp.key or lp.id)
+        if not r or not r.p or lp.unit < r.p then P.Record(AH.PriceKey(lp.key or lp.id), lp.unit, nil, nil, nil) end
     end
     Say(text, "idle")
     Sell.justPosted = true
@@ -656,7 +685,11 @@ function UI.BuildSell(parent)
             GameTooltip:SetText(bar and "Smelt into bars instead" or "Make " .. bd.name .. "s instead")
             GameTooltip:AddLine(("%d %s (%d %s each), %s at %s each."):format(bd.crafts, bd.name, bd.per, mat,
                 bd.onAH and "sold on the AH" or "sold to a vendor", Short(bd.each)), 1, 1, 1, true)
-            if bd.onAH then GameTooltip:AddLine("AH price after the 5% cut.", 0.6, 0.6, 0.6, true) end
+            if bd.onAH then
+                GameTooltip:AddLine(bd.rate and ("AH price after the 5% cut, times how often it sells (" .. Pct(bd.rate) .. ").")
+                    or "AH price after the 5% cut.", 0.6, 0.6, 0.6, true)
+            end
+            if bd.matRate then GameTooltip:AddLine(("The %s sells %s of the time, counted the same way."):format(mat, Pct(bd.matRate)), 0.6, 0.6, 0.6, true) end
             GameTooltip:AddDoubleLine(bd.per > 1 and ((bar and "Bars" or "Stones") .. " + leftover " .. mat) or (bar and "Bars" or "Stones"),
                 AH.Money(bd.value), 1, 0.82, 0, 1, 1, 1)
             GameTooltip:AddDoubleLine("More than selling the " .. mat, AH.Money(bd.gain), 1, 0.82, 0, 0.31, 0.84, 0.42)
@@ -807,6 +840,19 @@ function UI.BuildSell(parent)
         return (tonumber(qty:GetText()) or 0), price:GetAmount()
     end
 
+    -- cancelled auctions come back by mail, not to your bags: say so until they are picked up
+    local function MailNote()
+        local names = {}
+        local Count = (C_Item and C_Item.GetItemCount) or GetItemCount
+        for id in pairs(AH.repost) do
+            if not Count or (Count(id) or 0) == 0 then names[#names + 1] = P.Name(id) or ("item " .. id) end
+        end
+        if #names == 0 then return "" end
+        table.sort(names)
+        return "|cff8a8a8aCancelled, waiting in your mail: " .. table.concat(names, ", ")
+            .. ". They go first in Post all once you take them.|r"
+    end
+
     local function PaintForm()
         local sel = Sell.sel
         local on = sel ~= nil
@@ -828,7 +874,7 @@ function UI.BuildSell(parent)
             sum:Hide()
             post:SetLabel("Post")
             post:SetActive(false)
-            msg:SetText(Sell.msg or "")
+            msg:SetText((Sell.msg and Sell.msg ~= "") and Sell.msg or MailNote())
             return
         end
         slot.hint:Hide()
@@ -842,13 +888,15 @@ function UI.BuildSell(parent)
         ofN:SetText("of " .. avail)
         local n, unit = Total()
         local dep = Sell.Deposit(n)
-        local usual = AH.GetMarketPrice(sel.id)
+        local usual = AH.GetMarketPrice(sel.link or sel.id)
         local fl, kind
-        if AH.settings.sellSmart then fl, kind = Sell.Floor(sel.id) end
+        if AH.settings.sellSmart then fl, kind = Sell.Floor(sel.id, sel.link) end
         local ref = {}
         if usual then ref[#ref + 1] = "Usual |cffffffff" .. Short(usual) .. "|r" end
         if fl then ref[#ref + 1] = (kind == "own" and "Your floor " or "Floor ") .. "|cffffffff" .. Short(fl) .. "|r" end
-        info:SetText(table.concat(ref, "   |cff555555|||r   "))
+        local sr = Rate(sel.id)
+        if sr then ref[#ref + 1] = "Sells |cffffffff" .. Pct(sr) .. "|r" end
+        info:SetText(table.concat(ref, #ref > 2 and "  |cff555555|||r  " or "   |cff555555|||r   "))
         why:SetText(Sell.why or "")
         local rule = Sell.Rule(sel.id)
         floorB:SetLabel(rule and rule.floor and "Clear floor" or "Set floor")
@@ -860,7 +908,9 @@ function UI.BuildSell(parent)
         sumDep:SetText(dep and ("|cffd97a7a" .. Short(dep) .. "|r  |cff8a8a8aback if sold|r") or "|cff8a8a8a-|r")
         sumNet:SetText(gross > 0 and AH.Money(net) or "|cff8a8a8a-|r")
         local vend = SellPrice(sel.id)
-        local band = n > 0 and Sell.BandageBest(sel.id, n, math.max(net, (vend or 0) * n)) or nil
+        local mrate = Rate(sel.id)
+        local band = n > 0 and Sell.BandageBest(sel.id, n, math.max(math.floor(net * (mrate or 1)), (vend or 0) * n)) or nil
+        if band then band.matRate = mrate end
         Sell.band = band
         bandHit:SetShown(band ~= nil)
         if band then
@@ -934,7 +984,7 @@ function UI.BuildSell(parent)
                 r.name:SetText(nm)
                 local col = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
                 if col then r.name:SetTextColor(col.r, col.g, col.b) else r.name:SetTextColor(T.text[1], T.text[2], T.text[3]) end
-                local ah = AH.GetPrice(e.id)
+                local ah = AH.GetPrice(e.link or e.id)
                 local vend = SellPrice(e.id)
                 r.ah:SetText(ah and Short(ah) or "|cff8a8a8a-|r")
                 r.vendor:SetText(vend and vend > 0 and Short(vend) or "-")
@@ -977,7 +1027,7 @@ function UI.BuildSell(parent)
         if Sell.sel then
             if Sell.sel.id ~= lastSelID then
                 qty:SetText(tostring(Sell.Available()))
-                local s = AH.GetPrice(Sell.sel.id)
+                local s = AH.GetPrice(Sell.sel.link or Sell.sel.id)
                 if s then price:SetAmount(s) else price:SetAmount(0) end
             end
             lastSelID = Sell.sel.id
@@ -993,20 +1043,22 @@ function UI.BuildSell(parent)
     -- Post all: a list of every bag item worth listing (an AH price that beats the vendor, not left out);
     -- each Post click lists one, then the next item is picked and priced from its live listings
     function Sell.BuildQueue()
-        local ids, first = {}, {}
+        local ids, first, later = {}, {}, {}
         for _, e in ipairs(Sell.BagItems()) do
             if not AH.db.noSell[e.id] then
                 if AH.repost[e.id] then
                     first[#first + 1] = e.id -- cancelled undercut auctions go first
                 else
-                    local p = AH.GetPrice(e.id) or AH.GetMarketPrice(e.id)
+                    local p = AH.GetPrice(e.link or e.id) or AH.GetMarketPrice(e.link or e.id)
                     local vend = SellPrice(e.id) or 0
-                    local band = p and Sell.BandageBest(e.id, e.count, math.floor(p * 0.95) * e.count)
-                    if p and p * 0.95 > vend and not band then ids[#ids + 1] = e.id end
+                    local band = p and Sell.BandageBest(e.id, e.count, math.floor(p * 0.95 * (Rate(e.id) or 1)) * e.count)
+                    if p and p * 0.95 > vend and not band then ids[#ids + 1] = e.id
+                    elseif not p then later[#later + 1] = e.id end -- no price yet: last, priced from its live listings
                 end
             end
         end
         for i = #first, 1, -1 do table.insert(ids, 1, first[i]) end
+        for _, id in ipairs(later) do ids[#ids + 1] = id end
         return ids
     end
     local function QueueNext()

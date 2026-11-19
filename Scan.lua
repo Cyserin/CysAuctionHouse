@@ -73,6 +73,7 @@ local function Read(token)
     end
     Scan.state = "reading"
     local agg, names = {}, AH.db.names
+    local suffixed = {} -- itemIDs seen with a random suffix: priced per suffix only
     local i = 0
     local function Step()
         if Scan.token ~= token then return end -- stopped (AH closed)
@@ -81,8 +82,11 @@ local function Read(token)
             local name, _, count, _, _, _, _, _, _, buyout, _, _, _, _, _, _, itemID = C_AuctionHouse.GetReplicateItemInfo(i)
             if itemID and buyout and buyout > 0 and count and count > 0 then
                 local unit = buyout / count
-                local a = agg[itemID]
-                if not a then a = { q = 0, n = 0, u = {} }; agg[itemID] = a end
+                local link = C_AuctionHouse.GetReplicateItemLink and C_AuctionHouse.GetReplicateItemLink(i)
+                local key = link and AH.PriceKey(link) or itemID
+                if key ~= itemID then suffixed[itemID] = true end
+                local a = agg[key]
+                if not a then a = { q = 0, n = 0, u = {} }; agg[key] = a end
                 a.q = a.q + count
                 a.n = a.n + 1
                 a.u[#a.u + 1] = { unit, count }
@@ -105,6 +109,8 @@ local function Read(token)
             P.Record(itemID, units[1], a.q, a.n, units, now, counts)
             n = n + 1
         end
+        -- a record under the bare itemID of suffixed gear mixed every suffix together: drop it
+        for itemID in pairs(suffixed) do if not agg[itemID] then AH.realm.items[itemID] = nil end end
         AH.realm.lastFull = now
         AH.realm.lastFullCount = n
         Scan.Stop()
@@ -150,9 +156,9 @@ local function FromBrowse(results)
     if type(results) ~= "table" then return end
     local now, any = time(), false
     for _, r in ipairs(results) do
-        local id = r.itemKey and r.itemKey.itemID
+        local id = r.itemKey and AH.PriceKey(r.itemKey)
         if id and r.minPrice and r.minPrice > 0 and (r.itemKey.battlePetSpeciesID or 0) == 0 then
-            local old = AH.realm.items[id]
+            local old = P.Get(r.itemKey)
             -- keep the deeper listing info from a full scan when the lowest price did not change
             if old and old.p == r.minPrice and old.l then
                 old.t = now
@@ -204,6 +210,6 @@ AH.On("ITEM_SEARCH_RESULTS_UPDATED", function(itemKey)
     table.sort(rows, function(x, y) return x[1] < y[1] end)
     local units, counts = {}, {}
     for k = 1, math.min(DEPTH, #rows) do units[k], counts[k] = rows[k][1], rows[k][2] end
-    P.Record(itemKey.itemID, units[1], qty, #rows, units, nil, counts)
+    P.Record(AH.PriceKey(itemKey), units[1], qty, #rows, units, nil, counts)
     AH.FirePricesChanged()
 end)

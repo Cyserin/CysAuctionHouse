@@ -11,6 +11,7 @@ Core.lua
 Style.lua
 Prices.lua
 Scan.lua
+History.lua
 Tooltip.lua
 Tab.lua
 Deals.lua

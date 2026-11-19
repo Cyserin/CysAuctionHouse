@@ -17,15 +17,43 @@ local function Today() return floor(time() / 86400) end
 
 local function Items() return AH.realm and AH.realm.items end
 
+-- Random-suffix gear ("of the Bandit", "of the Channeler") shares one itemID, so each suffix gets its own
+-- record under the key "itemID:suffix" in AH.realm.sfx. Everything else stays under its itemID.
+-- AH.PriceKey(item) takes an itemID, item link or ItemKey table.
+function AH.PriceKey(item)
+    local id, sfx
+    if type(item) == "number" then return item end
+    if type(item) == "table" then
+        id, sfx = item.itemID, item.itemSuffix
+    elseif type(item) == "string" then
+        id = tonumber(item:match("item:(%d+)") or item)
+        sfx = item:match("item:%d+:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:(%-?%d+)")
+    end
+    sfx = tonumber(sfx)
+    if not id then return nil end
+    if sfx and sfx ~= 0 then return id .. ":" .. sfx end
+    return id
+end
+local function Store(key)
+    if not AH.realm then return nil end
+    if type(key) == "string" then
+        AH.realm.sfx = AH.realm.sfx or {}
+        return AH.realm.sfx
+    end
+    return AH.realm.items
+end
+
 -- Drop daily lows older than the history setting
 function P.Prune()
     local items = Items()
     if not items then return end
     local oldest = Today() - (AH.settings.historyDays or 14)
-    for _, r in pairs(items) do
-        if r.d then
-            for day in pairs(r.d) do
-                if day < oldest then r.d[day] = nil end
+    for _, store in ipairs({ items, AH.realm.sfx or {} }) do
+        for _, r in pairs(store) do
+            if r.d then
+                for day in pairs(r.d) do
+                    if day < oldest then r.d[day] = nil end
+                end
             end
         end
     end
@@ -34,13 +62,14 @@ end
 -- Save what was seen for one item.
 --   unit  = lowest price per item, qty = items listed (or nil), count = listings (or nil),
 --   list  = sorted lowest prices per item (or nil), counts = items in each of those listings (or nil)
-function P.Record(itemID, unit, qty, count, list, now, counts)
-    local items = Items()
+function P.Record(itemID, unit, qty, count, list, now, counts) -- itemID may be a PriceKey ("id:suffix")
+    local items = Store(itemID)
     if not items or not itemID or not unit or unit <= 0 then return end
     now = now or time()
     local r = items[itemID]
     if not r then r = {}; items[itemID] = r end
     r.p, r.t = floor(unit), now
+    if qty and AH.History and AH.History.Watch then pcall(AH.History.Watch, r, qty, now) end -- market sell estimate
     r.q, r.n = qty, count
     if list and #list > 0 then
         local l = {}
@@ -62,9 +91,9 @@ function P.Record(itemID, unit, qty, count, list, now, counts)
 end
 
 function P.Get(item)
-    local items = Items()
-    local id = AH.ItemID(item)
-    return items and id and items[id], id
+    local key = AH.PriceKey(item)
+    local items = key and Store(key)
+    return items and items[key], AH.ItemID(item)
 end
 
 function AH.GetPrice(item)
