@@ -49,6 +49,25 @@ local function Rate(id)
     return ok and r or nil
 end
 local function Pct(r) return r and (math.floor(r * 100 + 0.5) .. "%") or "?" end
+
+-- Price key for a picked item or bag row: the AH's own ItemKey (its itemSuffix is exact for random-suffix gear
+-- like "of the Whale"), else the link, else the itemID.
+local function PK(e)
+    if not e then return nil end
+    if e.gear and not e.key and e.loc then
+        local ok, key = pcall(C_AuctionHouse.GetItemKeyFromItem, e.loc)
+        if ok and key then e.key = key end
+    end
+    return (e.key and AH.PriceKey(e.key)) or e.link or e.id
+end
+Sell.PK = PK
+
+-- Display name: gear keeps its suffix ("Field Plate Leggings of the Whale")
+local function FullName(e)
+    local fromLink = e.link and e.link:match("%[(.-)%]")
+    if e.gear and fromLink and fromLink ~= "" then return fromLink end
+    return P.Name(e.id) or fromLink or ""
+end
 Sell.Pct = Pct
 
 local function SellPrice(id)
@@ -93,7 +112,7 @@ function Sell.BagItems()
     end
     -- most valuable first (AH price x count), items without a price after
     table.sort(out, function(a, b)
-        local pa, pb = (AH.GetPrice(a.link or a.id) or 0) * a.count, (AH.GetPrice(b.link or b.id) or 0) * b.count
+        local pa, pb = (AH.GetPrice(PK(a)) or 0) * a.count, (AH.GetPrice(PK(b)) or 0) * b.count
         if pa ~= pb then return pa > pb end
         return (P.Name(a.id) or "") < (P.Name(b.id) or "")
     end)
@@ -413,6 +432,34 @@ end
 
 -- The lowest price smart pricing will go to: your own floor for this item, else the higher of
 -- (a % of the usual price) and (the price that still beats a vendor after the 5% cut). Returns price, kind.
+-- Random-suffix gear nobody lists in your suffix: what other suffixes of the same item went for (full scans
+-- and searches), as a guide. nil when there is nothing to show.
+function Sell.OtherVersions(sel)
+    if not sel or not sel.gear then return nil end
+    local own = PK(sel)
+    if type(own) ~= "string" or not AH.realm or not AH.realm.sfx then return nil end
+    local prefix = sel.id .. ":"
+    local base = P.Name(sel.id) or ""
+    local names = AH.db.sfxNames or {}
+    local rows = {}
+    for key, r in pairs(AH.realm.sfx) do
+        if key ~= own and key:sub(1, #prefix) == prefix and r.p then
+            local nm = names[key] or ""
+            if base ~= "" and nm:sub(1, #base) == base then nm = nm:sub(#base + 2) end
+            rows[#rows + 1] = { nm ~= "" and nm or "another version", r.p, r.t }
+        end
+    end
+    if #rows == 0 then return nil end
+    table.sort(rows, function(a, b) return a[2] < b[2] end)
+    local parts = {}
+    for i = 1, math.min(4, #rows) do
+        local age = rows[i][3] and (" |cff8a8a8a(" .. AH.Age(time() - rows[i][3]) .. ")|r") or ""
+        parts[i] = rows[i][1] .. " |cffffffff" .. Short(rows[i][2]) .. "|r" .. age
+    end
+    return "Nobody is selling yours (" .. (FullName(sel):match(" (of .+)$") or "this one")
+        .. ") right now. Other versions seen: " .. table.concat(parts, ", ") .. "."
+end
+
 function Sell.Floor(id, pk) -- pk: link / price key for suffixed gear (prices), id: rules + vendor
     local r = Sell.Rule(id)
     if r and r.floor and r.floor > 0 then return r.floor, "own" end
@@ -437,7 +484,7 @@ function Sell.Suggest()
     local sel = Sell.sel
     if not sel then return nil end
     local id = sel.id
-    local pk = sel.link or id
+    local pk = PK(sel)
     local list = Sell.listings
     local under = AH.settings.sellUndercut or 1
     local usual = AH.GetMarketPrice(pk)
@@ -511,7 +558,7 @@ function Sell.Post(qty, unit)
     else ok = C_AuctionHouse.PostItem(sel.loc, dur, qty, nil, unit) end
     if ok then
         Sell.pending = { commodity = sel.commodity, loc = sel.loc, dur = dur, qty = qty, unit = unit }
-        Sell.lastPost = { id = sel.id, key = sel.link or sel.id, qty = qty, unit = unit }
+        Sell.lastPost = { id = sel.id, key = PK(sel), qty = qty, unit = unit }
         Say("Posting...", "posting")
     else
         Say("The game did not accept this post.", "ready")
@@ -879,7 +926,7 @@ function UI.BuildSell(parent)
         end
         slot.hint:Hide()
         slot.icon:SetTexture(sel.icon or 134400)
-        name:SetText(P.Name(sel.id) or (sel.link and sel.link:match("%[(.-)%]")) or "")
+        name:SetText(FullName(sel))
         local q = C_Item.GetItemQualityByID and C_Item.GetItemQualityByID(sel.id)
         local col = q and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
         if col then name:SetTextColor(col.r, col.g, col.b) end
@@ -888,9 +935,9 @@ function UI.BuildSell(parent)
         ofN:SetText("of " .. avail)
         local n, unit = Total()
         local dep = Sell.Deposit(n)
-        local usual = AH.GetMarketPrice(sel.link or sel.id)
+        local usual = AH.GetMarketPrice(PK(sel))
         local fl, kind
-        if AH.settings.sellSmart then fl, kind = Sell.Floor(sel.id, sel.link) end
+        if AH.settings.sellSmart then fl, kind = Sell.Floor(sel.id, PK(sel)) end
         local ref = {}
         if usual then ref[#ref + 1] = "Usual |cffffffff" .. Short(usual) .. "|r" end
         if fl then ref[#ref + 1] = (kind == "own" and "Your floor " or "Floor ") .. "|cffffffff" .. Short(fl) .. "|r" end
@@ -965,7 +1012,7 @@ function UI.BuildSell(parent)
         if not Sell.sel then lEmpty:SetText("")
         elseif Sell.state == "searching" then lEmpty:SetText("Loading...")
         elseif Sell.noAnswer then lEmpty:SetText("The listings did not load. Click the item to try again.")
-        elseif list and #list == 0 then lEmpty:SetText("Nobody is selling this right now - you set the price.")
+        elseif list and #list == 0 then lEmpty:SetText(Sell.OtherVersions(sel) or "Nobody is selling this right now - you set the price.")
         else lEmpty:SetText("") end
     end
 
@@ -978,13 +1025,13 @@ function UI.BuildSell(parent)
             r.entry = e
             if e then
                 r.icon:SetTexture(e.icon or 134400)
-                local nm = P.Name(e.id) or (e.link and e.link:match("%[(.-)%]")) or ""
+                local nm = FullName(e)
                 if e.count > 1 then nm = nm .. " |cff8a8a8ax" .. e.count .. "|r" end
                 if AH.db.noSell[e.id] then nm = nm .. " |cff8a8a8a(left out)|r" end
                 r.name:SetText(nm)
                 local col = e.quality and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[e.quality]
                 if col then r.name:SetTextColor(col.r, col.g, col.b) else r.name:SetTextColor(T.text[1], T.text[2], T.text[3]) end
-                local ah = AH.GetPrice(e.link or e.id)
+                local ah = AH.GetPrice(PK(e))
                 local vend = SellPrice(e.id)
                 r.ah:SetText(ah and Short(ah) or "|cff8a8a8a-|r")
                 r.vendor:SetText(vend and vend > 0 and Short(vend) or "-")
@@ -1027,7 +1074,7 @@ function UI.BuildSell(parent)
         if Sell.sel then
             if Sell.sel.id ~= lastSelID then
                 qty:SetText(tostring(Sell.Available()))
-                local s = AH.GetPrice(Sell.sel.link or Sell.sel.id)
+                local s = AH.GetPrice(PK(Sell.sel))
                 if s then price:SetAmount(s) else price:SetAmount(0) end
             end
             lastSelID = Sell.sel.id
@@ -1049,7 +1096,7 @@ function UI.BuildSell(parent)
                 if AH.repost[e.id] then
                     first[#first + 1] = e.id -- cancelled undercut auctions go first
                 else
-                    local p = AH.GetPrice(e.link or e.id) or AH.GetMarketPrice(e.link or e.id)
+                    local p = AH.GetPrice(PK(e)) or AH.GetMarketPrice(PK(e))
                     local vend = SellPrice(e.id) or 0
                     local band = p and Sell.BandageBest(e.id, e.count, math.floor(p * 0.95 * (Rate(e.id) or 1)) * e.count)
                     if p and p * 0.95 > vend and not band then ids[#ids + 1] = e.id

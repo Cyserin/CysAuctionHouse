@@ -26,6 +26,7 @@ function AH.PriceKey(item)
     if type(item) == "table" then
         id, sfx = item.itemID, item.itemSuffix
     elseif type(item) == "string" then
+        if item:match("^%d+:%-?%d+$") then return item end -- already a key
         id = tonumber(item:match("item:(%d+)") or item)
         sfx = item:match("item:%d+:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:(%-?%d+)")
     end

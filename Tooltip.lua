@@ -68,6 +68,15 @@ if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum.Too
         local link = data.hyperlink
         if not link and tt.GetItem then link = select(2, tt:GetItem()) end
         if link and AH.ItemID(link) ~= id then link = nil end
+        -- gear in your bags: the AH's own key knows the exact random suffix
+        local cls = select(6, C_Item.GetItemInfoInstant(id))
+        if (cls == 2 or cls == 4) and data.guid and C_Item.GetItemLocation and C_AuctionHouse and C_AuctionHouse.GetItemKeyFromItem then
+            local ok, loc = pcall(C_Item.GetItemLocation, data.guid)
+            if ok and loc then
+                local ok2, key = pcall(C_AuctionHouse.GetItemKeyFromItem, loc)
+                if ok2 and key then link = AH.PriceKey(key) end
+            end
+        end
         Add(tt, id, link)
         AddCraft(tt, id)
     end)

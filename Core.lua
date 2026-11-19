@@ -132,6 +132,14 @@ SlashCmdList.CYSAH = function(msg)
             AH.realm.lastFull and (AH.Age(time() - AH.realm.lastFull) .. " ago") or "never"))
     elseif msg == "bags" then
         if AH.Sell and AH.Scan.isOpen then AH.Sell.CheckBags() else AH.Print("Open the Auction House first.") end
+    elseif msg == "link" then
+        -- for fixing random-suffix prices: how this client writes the picked Sell item's link and AH key
+        local sel = AH.Sell and AH.Sell.sel
+        if not sel then AH.Print("Pick an item in the Sell view first.") return end
+        AH.Print("Link: " .. tostring(sel.link):gsub("|", "||"))
+        local k = sel.key
+        AH.Print(("AH key: item %s, suffix %s. Price key: %s, from the link: %s"):format(tostring(k and k.itemID),
+            tostring(k and k.itemSuffix), tostring(AH.Sell.PK and AH.Sell.PK(sel)), tostring(AH.PriceKey(sel.link))))
     elseif msg == "tooltip" then
         AH.settings.tooltip = not AH.settings.tooltip
         AH.Print("Tooltip prices " .. (AH.settings.tooltip and "on." or "off."))

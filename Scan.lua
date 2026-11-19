@@ -87,6 +87,10 @@ local function Read(token)
                 if key ~= itemID then suffixed[itemID] = true end
                 local a = agg[key]
                 if not a then a = { q = 0, n = 0, u = {} }; agg[key] = a end
+                if key ~= itemID and name and name ~= "" then -- "Field Plate Leggings of the Whale"
+                    AH.db.sfxNames = AH.db.sfxNames or {}
+                    AH.db.sfxNames[key] = name
+                end
                 a.q = a.q + count
                 a.n = a.n + 1
                 a.u[#a.u + 1] = { unit, count }
@@ -157,6 +161,13 @@ local function FromBrowse(results)
     local now, any = time(), false
     for _, r in ipairs(results) do
         local id = r.itemKey and AH.PriceKey(r.itemKey)
+        if type(id) == "string" and C_AuctionHouse.GetItemKeyInfo then
+            local info = C_AuctionHouse.GetItemKeyInfo(r.itemKey)
+            if info and info.itemName and info.itemName ~= "" then
+                AH.db.sfxNames = AH.db.sfxNames or {}
+                AH.db.sfxNames[id] = info.itemName
+            end
+        end
         if id and r.minPrice and r.minPrice > 0 and (r.itemKey.battlePetSpeciesID or 0) == 0 then
             local old = P.Get(r.itemKey)
             -- keep the deeper listing info from a full scan when the lowest price did not change
